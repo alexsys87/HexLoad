@@ -7,6 +7,7 @@ Windows, WPF, .NET 8. The matching bootloader firmware (see the [project README]
 all with the same protocol:
 [`../Firmware/bl_f030`](../Firmware/bl_f030) for STM32F030,
 [`../Firmware/bl_f103`](../Firmware/bl_f103) for STM32F103C8 (Blue Pill),
+[`../Firmware/bl_f103vc`](../Firmware/bl_f103vc) for STM32F103VCT6 (HY-MiniSTM32V),
 [`../Firmware/bl_f401`](../Firmware/bl_f401) and [`../Firmware/bl_f411`](../Firmware/bl_f411)
 for STM32F401 / STM32F411 (WeAct Black Pill).
 
@@ -64,6 +65,7 @@ HEX / S-record / TI-TXT images must be linked for the application address (`0x08
 | `ProgressWindow.xaml(.cs)` | Programming progress with cancel |
 | `../Firmware/bl_f030/App/main.c` | Bootloader firmware for STM32F030 (register level, no HAL) |
 | `../Firmware/bl_f103/App/main.c` | Bootloader firmware for STM32F103C8 / Blue Pill (register level, no HAL) |
+| `../Firmware/bl_f103vc/App/main.c` | Bootloader firmware for STM32F103VCT6 / HY-MiniSTM32V (register level, no HAL) |
 | `../Firmware/bl_f401/App/main.c`, `../Firmware/bl_f411/App/main.c` | Bootloader firmware for STM32F401 / STM32F411 / Black Pill (same source) |
 
 Tunable `Bootloader` properties:
@@ -153,11 +155,13 @@ The application area size is `pages * page_size`. The reference firmware reports
 |---|---|---|---|
 | `bl_f030` (STM32F030F4) | 14 | 1024 | 16 KB device, 2 KB bootloader, 14 KB application |
 | `bl_f103` (STM32F103C8) | 62 | 1024 | 64 KB device, 2 KB bootloader, 62 KB application |
+| `bl_f103vc` (STM32F103VCT6) | 254 | 1024 | 256 KB device, 2 KB bootloader (one 2 KB flash page), 254 KB application |
 | `bl_f401` (STM32F401CC) | 240 | 1024 | 256 KB device, 16 KB bootloader (sector 0), 240 KB application |
 | `bl_f401` / `bl_f411` (STM32F401CE, STM32F411CE) | 496 | 1024 | 512 KB device, 16 KB bootloader (sector 0), 496 KB application |
 
-On the STM32F401 / STM32F411 the flash is erased in sectors of 16 to 128 KB. There a "page" is
-only the write unit of `CMD_PROG`, and `CMD_ERASE` erases all sectors of the application area.
+On the STM32F103VC the flash is erased in 2 KB pages, on the STM32F401 / STM32F411 in sectors of
+16 to 128 KB. There a "page" is only the write unit of `CMD_PROG`, and `CMD_ERASE` erases all
+pages / sectors of the application area.
 
 ## Programming sequence
 
@@ -284,16 +288,18 @@ uint32_t stm32_crc32(const void *buf, size_t len)
 - No interrupts are used: the main loop polls the USART IDLE flag and the SysTick `COUNTFLAG`.
   Only the first four vector table entries (initial SP, Reset, NMI, HardFault) are ever fetched,
   so `startup.c` uses a 4-entry vector table instead of the full one
-  (48 entries on the STM32F030, 59 on the STM32F103, 101 / 102 on the STM32F401 / STM32F411).
+  (48 entries on the STM32F030, 59 on the STM32F103C8, 76 on the STM32F103VC, 101 / 102 on the
+  STM32F401 / STM32F411).
 - Size with GCC `-Os -ffunction-sections -fdata-sections -Wl,--gc-sections` (vectors + code):
 
   | Firmware | Full vector table | 4-entry table |
   |---|---|---|
   | `bl_f030` (Cortex-M0) | 1076 bytes | 900 bytes |
   | `bl_f103` (Cortex-M3) | 1072 bytes | 852 bytes |
+  | `bl_f103vc` (Cortex-M3) | 1140 bytes | 852 bytes |
   | `bl_f401` / `bl_f411` (Cortex-M4) | 1448 bytes | 1060 bytes |
 
-  With the short table the STM32F030 / STM32F103 bootloader fits into one 1 KB page; the application area could then
+  With the short table the STM32F030 / STM32F103C8 bootloader fits into one 1 KB page; the application area could then
   start at `0x08000400` (`APPLICATION_ADDRESS`, `BLOCK_SIZE` + 1, application linker script and the
   HexLoad *App address* setting changed accordingly) - the protocol itself does not change.
 
@@ -311,9 +317,10 @@ STM32F030 (`bl_f030`):
   (reserve 192 bytes there), remap SRAM to address 0 via `SYSCFG->CFGR1.MEM_MODE`, and then call
   `__enable_irq()` - the bootloader starts the application with interrupts disabled (`PRIMASK = 1`).
 
-STM32F103 (`bl_f103`):
+STM32F103 (`bl_f103`, `bl_f103vc`):
 
-- Link the application for `0x08000800` (flash origin `0x08000800`, length 62 KB).
+- Link the application for `0x08000800` (flash origin `0x08000800`, length 62 KB for the
+  STM32F103C8, 254 KB for the STM32F103VC).
 - The bootloader sets `SCB->VTOR = 0x08000800` and starts the application with interrupts enabled
   (`PRIMASK = 0`, as after reset). If the application's `SystemInit()` writes `VTOR` itself (older
   CMSIS / CubeF1 versions do it unconditionally), set `VECT_TAB_OFFSET` to `0x800`

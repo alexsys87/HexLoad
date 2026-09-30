@@ -7,6 +7,7 @@ through them. All bootloaders use the same protocol:
 |---|---|---|
 | Bootloader STM32F030 | [`Firmware/bl_f030`](Firmware/bl_f030) | STM32F030F4 |
 | Bootloader STM32F103 | [`Firmware/bl_f103`](Firmware/bl_f103) | STM32F103C8, "Blue Pill" board |
+| Bootloader STM32F103VC | [`Firmware/bl_f103vc`](Firmware/bl_f103vc) | STM32F103VCT6, HY-MiniSTM32V board |
 | Bootloader STM32F401 | [`Firmware/bl_f401`](Firmware/bl_f401) | STM32F401CC / CE, WeAct Studio "Black Pill" board |
 | Bootloader STM32F411 | [`Firmware/bl_f411`](Firmware/bl_f411) | STM32F411CE, WeAct Studio "Black Pill" board |
 | Host application | [`WpfApp`](WpfApp) | Windows WPF (.NET 8) programmer plus firmware file viewer and converter |
@@ -38,6 +39,7 @@ HexLoad/
 │   │       ├── bl_f030.icf            linker configuration
 │   │       └── startup.c              4-entry vector table and reset handler
 │   ├── bl_f103/                STM32F103C8 (Blue Pill) bootloader, same structure (STM32F1xx headers)
+│   ├── bl_f103vc/              STM32F103VCT6 (HY-MiniSTM32V) bootloader, same structure (STM32F1xx headers)
 │   ├── bl_f401/                STM32F401 (Black Pill) bootloader, same structure (STM32F4xx headers)
 │   └── bl_f411/                STM32F411 (Black Pill) bootloader, same structure (STM32F4xx headers)
 └── WpfApp/                     host application (HexLoad.sln), see WpfApp/README.md
@@ -56,18 +58,21 @@ All bootloaders share the same code structure and protocol; only the hardware la
 
 ### Target and resources
 
-| Item | `bl_f030` | `bl_f103` | `bl_f401` / `bl_f411` |
-|---|---|---|---|
-| MCU | STM32F030F4, Cortex-M0 | STM32F103C8, Cortex-M3 | STM32F401CC/CE, STM32F411CE, Cortex-M4 |
-| Flash / SRAM | 16 KB / 4 KB | 64 KB / 20 KB | 256 or 512 KB / 64, 96 or 128 KB |
-| Board | custom | Blue Pill | WeAct Studio Black Pill |
-| Clock | HSI 8 MHz | HSI 8 MHz | HSI 16 MHz |
-| UART | USART1, PA2 = TX, PA3 = RX | USART1, PA9 = TX, PA10 = RX | USART1, PA9 = TX, PA10 = RX |
-| RX DMA | DMA1 Channel 3 | DMA1 Channel 5 | DMA2 Stream 2 Channel 4 |
-| Erase unit | 1 KB page | 1 KB page | 16 / 64 / 128 KB sector |
-| Bootloader area | 2 KB | 2 KB | sector 0, 16 KB |
-| Application address | `0x08000800` | `0x08000800` | `0x08004000` |
-| Application area | 14 KB (14 pages) | 62 KB (62 pages) | 240 KB or 496 KB (240 or 496 pages) |
+| Item | `bl_f030` | `bl_f103` | `bl_f103vc` | `bl_f401` / `bl_f411` |
+|---|---|---|---|---|
+| MCU | STM32F030F4, Cortex-M0 | STM32F103C8, Cortex-M3 | STM32F103VCT6, Cortex-M3 | STM32F401CC/CE, STM32F411CE, Cortex-M4 |
+| Flash / SRAM | 16 KB / 4 KB | 64 KB / 20 KB | 256 KB / 48 KB | 256 or 512 KB / 64, 96 or 128 KB |
+| Board | custom | Blue Pill | HY-MiniSTM32V | WeAct Studio Black Pill |
+| Clock | HSI 8 MHz | HSI 8 MHz | HSI 8 MHz | HSI 16 MHz |
+| UART | USART1, PA2 = TX, PA3 = RX | USART1, PA9 = TX, PA10 = RX | USART1, PA9 = TX, PA10 = RX (on-board PL2303) | USART1, PA9 = TX, PA10 = RX |
+| RX DMA | DMA1 Channel 3 | DMA1 Channel 5 | DMA1 Channel 5 | DMA2 Stream 2 Channel 4 |
+| Erase unit | 1 KB page | 1 KB page | 2 KB page | 16 / 64 / 128 KB sector |
+| Bootloader area | 2 KB | 2 KB | 2 KB | sector 0, 16 KB |
+| Application address | `0x08000800` | `0x08000800` | `0x08000800` | `0x08004000` |
+| Application area | 14 KB (14 pages) | 62 KB (62 pages) | 254 KB (254 pages) | 240 KB or 496 KB (240 or 496 pages) |
+
+A protocol "page" is always the 1 KB write unit of `CMD_PROG`. Where the erase unit is larger
+(STM32F103VC, STM32F4), `CMD_ERASE` erases the application area in the native pages or sectors.
 
 Common to all: 115200 8N1 with a pull-up on RX; a 16 + 1024 byte DMA buffer where the USART IDLE
 line marks the end of a packet; the STM32 hardware CRC unit; no interrupts (the main loop polls
@@ -75,11 +80,11 @@ the USART and SysTick flags); the core clock after reset is used as is (no PLL s
 
 ### Flash map
 
-| Address | `bl_f030` | `bl_f103` | `bl_f401` / `bl_f411` |
-|---|---|---|---|
-| `0x08000000` | bootloader, 2 KB | bootloader, 2 KB | bootloader, sector 0 (16 KB) |
-| `0x08000800` | application, 14 KB (up to `0x08003FFF`) | application, 62 KB (up to `0x0800FFFF`) | - |
-| `0x08004000` | - | - | application, sectors 1..5 (256 KB flash) or 1..7 (512 KB flash) |
+| Address | `bl_f030` | `bl_f103` | `bl_f103vc` | `bl_f401` / `bl_f411` |
+|---|---|---|---|---|
+| `0x08000000` | bootloader, 2 KB | bootloader, 2 KB | bootloader, 2 KB (one page) | bootloader, sector 0 (16 KB) |
+| `0x08000800` | application, 14 KB (up to `0x08003FFF`) | application, 62 KB (up to `0x0800FFFF`) | application, 254 KB (up to `0x0803FFFF`) | - |
+| `0x08004000` | - | - | - | application, sectors 1..5 (256 KB flash) or 1..7 (512 KB flash) |
 
 The host takes the size of the application area from the device (`CMD_GETINFO`), so it needs no
 per-board settings except the **App address** in HexLoad **Options...**. It is `0x08000800` by default.
@@ -106,19 +111,21 @@ HEX / S-record images: the bootloader always writes at its own application addre
    valid; if not, it keeps waiting for the host, so a board can always be reflashed.
 
 How the application gets control depends on the core. The STM32F030 (Cortex-M0) has no `VTOR`, so
-the application must relocate its vector table to SRAM. On the STM32F103 and STM32F401/F411 the
-bootloader sets `VTOR` itself. See [application requirements](WpfApp/README.md#application-requirements).
+the application must relocate its vector table to SRAM. On the STM32F103, STM32F103VC and
+STM32F401/F411 the bootloader sets `VTOR` itself. See [application requirements](WpfApp/README.md#application-requirements).
 
 ### Vector table and size
 
 The bootloader never enables an interrupt, so the core fetches only the first four vector table
 words: initial SP, Reset, NMI and HardFault. `EWARM/startup.c` therefore has a 4-entry table
-instead of the full one (STM32F030: 48 entries, STM32F103xB: 59, STM32F401: 101, STM32F411: 102):
+instead of the full one (STM32F030: 48 entries, STM32F103xB: 59, STM32F103xE: 76, STM32F401: 101,
+STM32F411: 102):
 
 | Firmware | Full vector table | 4-entry table |
 |---|---|---|
 | `bl_f030` | 1076 bytes | 900 bytes, fits into one 1 KB page |
 | `bl_f103` | 1072 bytes | 852 bytes, fits into one 1 KB page |
+| `bl_f103vc` | 1140 bytes | 852 bytes (the flash page is 2 KB) |
 | `bl_f401` / `bl_f411` | 1448 bytes | 1060 bytes (sector 0 is 16 KB) |
 
 Sizes are measured with GCC `-Os` and gc-sections.
@@ -136,7 +143,7 @@ linker script and the *App address* setting of HexLoad. The protocol does not ch
 
 Open `Firmware/<bl_xxx>/EWARM/<bl_xxx>.eww` in IAR Embedded Workbench for ARM (the projects were
 last saved with 9.70) and build. Flash the resulting image at `0x08000000` with any SWD programmer
-(ST-LINK, J-Link). The `bl_f103`, `bl_f401` and `bl_f411` projects are set up for ST-LINK.
+(ST-LINK, J-Link). The `bl_f103`, `bl_f103vc`, `bl_f401` and `bl_f411` projects are set up for ST-LINK.
 
 ### Blue Pill notes
 
@@ -145,6 +152,17 @@ last saved with 9.70) and build. Flash the resulting image at `0x08000000` with 
   the adapter) and GND. The USB connector of the board is not used by the bootloader.
 - The bootloader uses the 64 KB of the STM32F103C8. For a STM32F103CB (128 KB) change `BLOCK_SIZE`
   in `main.c` to `126` and select the STM32F103CB device in the IAR project options.
+
+### HY-MiniSTM32V notes
+
+- USART1 (PA9 = TX, PA10 = RX) is connected to the on-board PL2303 USB-UART converter: connect
+  the board to the PC with a USB cable and select the PL2303 COM port in HexLoad. No external
+  adapter is needed.
+- BOOT0 = 0 (boot from main flash).
+- The flash page of the high-density STM32F103 is 2 KB, so the 2 KB bootloader area is exactly
+  one page and the application starts at `0x08000800`, as on the other STM32F0/F1 bootloaders.
+- The bootloader itself is written through the JTAG/SWD connector (ST-LINK, J-Link) or with the ST
+  ROM bootloader over the same PL2303 port (BOOT0 = 1, then STM32CubeProgrammer or `stm32flash`).
 
 ### Black Pill notes
 
@@ -166,8 +184,9 @@ Usage and settings are covered in [WpfApp/README.md](WpfApp/README.md#quick-star
 Typical flashing session:
 
 1. Connect a USB-UART adapter to the bootloader UART (STM32F030: PA2/PA3, Blue Pill and Black Pill: PA9/PA10) and GND.
+   The HY-MiniSTM32V only needs a USB cable to its PL2303 port.
 2. In HexLoad open **Options...**, select the COM port and check the **App address**
-   (`0x08000800` for STM32F030 and Blue Pill, `0x08004000` for Black Pill).
+   (`0x08000800` for STM32F030, Blue Pill and HY-MiniSTM32V, `0x08004000` for Black Pill).
 3. Open the firmware file, then choose **Target -> Connect**.
 4. Reset the board: the bootloader answers within its 3 s window.
 5. Choose **Target -> Program**. HexLoad erases, writes, verifies and resets the device, which then starts the new application.
