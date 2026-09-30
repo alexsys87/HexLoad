@@ -3,86 +3,103 @@
  * @brief    Bootloader for STM32F030 (Cortex-M0) with UART/DMA/Flash/CRC.
  *
  * @protocol Bootloader communication protocol (UART, 115200 8N1):
- *   - Host sends command packet (P_Header + optional data).
- *   - Bootloader replies with response packet (P_Header + optional data).
+ *   - Host sends a command packet (P_Header + optional data).
+ *   - Bootloader replies with a response packet (P_Header + optional data).
  *
- *   Packet structure (P_Header, 16 bytes):
+ *   Framing:
+ *     USART RX runs through DMA into buff[]; the USART IDLE-line flag marks
+ *     the end of a packet. The host MUST send header and data as one continuous
+ *     burst - a pause longer than one character time splits the packet in two.
+ *
+ *   Packet structure (P_Header, 16 bytes, little-endian):
  *     +--------+--------+--------+--------+
  *     |  cmd   |  addr  |  size  |  crc   |
  *     +--------+--------+--------+--------+
  *     cmd  : 32-bit command code.
- *     addr : 32-bit address (for write/erase).
- *     size : 32-bit data size in bytes (must be multiple of 4).
- *     crc  : 32-bit CRC of the relevant fields (see below).
+ *     addr : 32-bit offset from APPLICATION_ADDRESS (WritePage only).
+ *     size : 32-bit data size in bytes (WritePage: <= FLASH_PAGE_SIZE, multiple of 4).
+ *     crc  : 32-bit CRC (see below).
  *
  *   Command codes:
- *     0x01  Connect          – no data, returns cmd|0x40.
- *     0x02  GetInfo          – returns P_Info structure (16 bytes).
- *     0x03  Erase            – erases all application pages, returns status.
- *     0x04  WritePage        – writes data (size ≤ 1024) at APPLICATION_ADDRESS+addr.
- *     0x05  Reset            – resets MCU, no reply.
+ *     0x01  Connect          - no data, returns cmd|0x40, disables the timeout.
+ *     0x02  GetInfo          - returns P_Info structure (16 bytes).
+ *     0x03  Erase            - erases all application pages, returns status.
+ *     0x04  WritePage        - writes data at APPLICATION_ADDRESS + addr, verifies.
+ *     0x05  Reset            - resets the MCU, no reply.
+ *     other                  - a single byte 0x80 is sent (no header).
  *
- *   Status bits (ORed with command code in response):
- *     0x40  OK               – operation succeeded.
- *     0x80  Error            – operation failed (CRC mismatch, verify fail, etc.).
+ *   Status bits (ORed with the command code in the response):
+ *     0x40  OK               - operation succeeded.
+ *     0x80  Error            - operation failed (CRC mismatch, range, verify fail).
  *
  *   P_Info structure (16 bytes):
  *     +--------+--------+--------+--------+
- *     |  ver   | prodId | blkSize|pgSize  |
+ *     |  ver   | prodId | blkSize| pgSize |
  *     +--------+--------+--------+--------+
  *     ver    : bootloader version (e.g., 0x00000001).
  *     prodId : product identifier (e.g., 0x12345678).
- *     blkSize: block size in pages (e.g., 14).
+ *     blkSize: number of application pages (e.g., 14).
  *     pgSize : flash page size (e.g., 1024).
  *
- *   CRC calculation:
- *     - For requests and responses WITHOUT data (Connect, Erase, Reset, WritePage reply):
- *         crc = CRC32(cmd, addr, size)   // first three 32‑bit words of P_Header
- *     - For requests with data (WritePage data):
- *         crc = CRC32(data)               // data only (size bytes)
- *     - For responses with data (GetInfo):
- *         crc = CRC32(info)                // info structure
- *
- *   CRC algorithm: standard CRC-32 (Ethernet) with polynomial 0x04C11DB7,
- *   initial value 0xFFFFFFFF, no final XOR (hardware CRC of STM32F0).
+ *   CRC calculation (STM32 CRC unit: poly 0x04C11DB7, init 0xFFFFFFFF,
+ *   32-bit words, no reflection, no final XOR):
+ *     - Host requests without data : CRC of the first 12 header bytes (not checked).
+ *     - Host requests with data    : CRC of the data (checked).
+ *     - Responses without data     : CRC of the 16 header bytes with crc = 0.
+ *     - Responses with data        : CRC of the data (P_Info).
  *
  *   Flow:
- *     1. Host sends Connect (cmd=0x01, addr=0, size=0, crc from header).
- *     2. Bootloader replies with cmd|0x40 (or cmd|0x80 on error).
- *     3. Host sends GetInfo; bootloader replies with P_Info + header.
- *     4. Host sends Erase; bootloader erases all pages and replies with status.
- *     5. For each page to write, host sends WritePage with data; bootloader
- *        verifies CRC, programs flash, verifies, and replies with status.
- *     6. After all pages, host may send Reset.
- *     7. If no command received within COMM_TIMEOUT (1000 ms), bootloader
- *        jumps to application at APPLICATION_ADDRESS.
+ *     1. Host sends Connect; bootloader replies with cmd|0x40.
+ *     2. Host sends GetInfo; bootloader replies with header + P_Info.
+ *     3. Host sends Erase; bootloader erases all application pages and replies.
+ *     4. For each page the host sends WritePage with data; the bootloader checks
+ *        the range and the CRC, programs, verifies and replies with the status.
+ *     5. Host sends Reset.
+ *     6. If Connect is not received within COMM_TIMEOUT (3000 ms), the bootloader
+ *        jumps to the application - only if its vector table looks valid;
+ *        otherwise it keeps waiting for the host.
  *
- * @note The bootloader occupies first 2 KB of flash (0x08000000–0x080007FF),
- *       application starts at 0x08000800.
+ * @implementation
+ *   No interrupts are used: the main loop polls the USART IDLE flag and the
+ *   SysTick COUNTFLAG. Only the first vector table entries (initial SP,
+ *   Reset_Handler, NMI, HardFault) are ever fetched, so the startup file may
+ *   use a 4-entry vector table.
+ *
+ * @note The bootloader occupies the first 2 KB of flash (0x08000000-0x080007FF),
+ *       the application starts at 0x08000800.
+ * @note On entry to the application PRIMASK is set (interrupts disabled) and the
+ *       vector table is still mapped from flash; the application must relocate
+ *       its vector table to SRAM, remap SRAM to 0x0 (SYSCFG clock must be enabled
+ *       for that) and call __enable_irq() itself.
  *****************************************************************************/
 
 #include "stm32f0xx.h"
 
-#define SYSCFG_CFGR1_MEMMODE_FLASH   (0 << 0) /* 00: Main Flash at 0x00000000 */
-#define SYSCFG_CFGR1_MEMMODE_SYSTEM  (1 << 0) /* 01: System Flash at 0x00000000 */
-#define SYSCFG_CFGR1_MEMMODE_SRAM    (3 << 0) /* 11: Embedded SRAM at 0x00000000 */
-
-#define COMM_TIMEOUT             3000
+#define COMM_TIMEOUT             3000       /* ms */
 #define CPU_FREQ                 8000000
 #define BAUD_RATE                115200
-#define APPLICATION_FLASH_START  0x08000000
-#define APPLICATION_ADDRESS      0x08000800 // 2k for bootloader
-#define APPLICATION_FLASH_END    (APPLICATION_ADDRESS + (FLASH_PAGE_SIZE * BLOCK_SIZE))
-
+#define APPLICATION_ADDRESS      0x08000800 /* 2k for bootloader */
 #define FLASH_PAGE_SIZE          1024
 #define BLOCK_SIZE               14
+#define APPLICATION_SIZE         (FLASH_PAGE_SIZE * BLOCK_SIZE)
+#define APPLICATION_FLASH_END    (APPLICATION_ADDRESS + APPLICATION_SIZE)
 #define BOOT_VERSION             0x00000001
 #define PRODUCT_ID               0x12345678
 #define BOOT_HEADER_SIZE         sizeof(P_Header)
-#define DMA_BUFF_SIZE            FLASH_PAGE_SIZE + BOOT_HEADER_SIZE
+#define DMA_BUFF_SIZE            (FLASH_PAGE_SIZE + BOOT_HEADER_SIZE)
 
+#ifndef FLASH_KEY1
 #define FLASH_KEY1 0x45670123
+#endif
+#ifndef FLASH_KEY2
 #define FLASH_KEY2 0xCDEF89AB
+#endif
+
+#define SRAM_START               0x20000000
+#define SRAM_SIZE_MAX            (32 * 1024)   /* upper bound for the whole STM32F030 family */
+
+/* Reset values used to hand the chip over to the application */
+#define RCC_AHBENR_RESET         0x00000014    /* SRAM + FLITF clocks */
 
 enum eCommand {
     Command_Connect    = 0x01,
@@ -94,17 +111,6 @@ enum eCommand {
     Command_OK         = 0x40,
     Command_Error      = 0x80,
 };
-
-enum eState {
-    State_Start = 0x01,
-    State_Done  = 0x02,
-};
-
-enum eError {
-    Error_None = 0,
-    Error_CRC  = 1,
-};
-
 
 typedef struct {
     uint32_t cmd;
@@ -120,445 +126,281 @@ typedef struct {
     uint32_t s;
 } P_Info;
 
-typedef void (*pFunction)(void);
+static const P_Info bootInfo = { BOOT_VERSION, PRODUCT_ID, BLOCK_SIZE, FLASH_PAGE_SIZE };
+static const uint32_t erasedWord = 0xFFFFFFFF;
 
-static volatile uint32_t timeTick;
-
-static uint8_t buff[DMA_BUFF_SIZE];
-static volatile enum eState     State;
-static volatile uint8_t         connected;
+/* Accessed as P_Header and uint32_t words: Cortex-M0 faults on unaligned word access */
+static uint8_t buff[DMA_BUFF_SIZE] __attribute__((aligned(4)));
 
 /**
-  * @brief  Initializes the INIT register.
-  * @note   After resetting CRC calculation unit, CRC_InitValue is stored in DR register
-  * @param  CRC_InitValue: Programmable initial CRC value
-  * @retval None
-  */
-void CRC_Init(uint32_t CRC_InitValue)
-{
-  CRC->INIT = CRC_InitValue;
-  /* Reset CRC generator */
-  CRC->CR = CRC_CR_RESET;
-}
-
-/**
-  * @brief  Computes the 32-bit CRC of a given buffer of data word(32-bit).
-  * @param  pBuffer: pointer to the buffer containing the data to be computed
-  * @param  BufferLength: length of the buffer to be computed
+  * @brief  Computes the 32-bit CRC of a buffer of 32-bit words.
+  *         The CRC unit INIT register keeps its reset value 0xFFFFFFFF.
+  * @param  pBuffer: word-aligned data
+  * @param  len: length in bytes (processed in whole words)
   * @retval 32-bit CRC
   */
-uint32_t CRC_Calc(const uint32_t *pBuffer, int32_t BufferLength)
+static uint32_t CRC_Calc(const uint32_t *pBuffer, uint32_t len)
 {
-  /* Reset CRC generator */
-  CRC->CR = CRC_CR_RESET;
-  
-  while( BufferLength > 0 )
-  {
-    CRC->DR = *pBuffer++;
-    
-    BufferLength-=4;
-  }
-  return (CRC->DR);
+    CRC->CR = CRC_CR_RESET;
+    for (; len; len -= 4)
+        CRC->DR = *pBuffer++;
+    return CRC->DR;
 }
 
-void FlashWaitBusy(void) {
-    while(FLASH->SR & FLASH_SR_BSY) {}
+static void FlashWaitBusy(void)
+{
+    while (FLASH->SR & FLASH_SR_BSY) {}
 }
 
-/**
-  * @brief  This function prepares the flash to be erased or programmed.
-  *         It first checks no flash operation is on going,
-  *         then unlocks the flash if it is locked.
-  * @param  None
-  * @retval None
-  */
-void FlashUnlock(void) {
-  /* (1) Wait till no operation is on going */
-  /* (2) Check that the Flash is unlocked */
-  /* (3) Perform unlock sequence */    
-    FlashWaitBusy();
+/* Unlock is always called with the flash locked: a key write to an unlocked
+   FPEC would lock it until the next reset. */
+static void FlashUnlock(void)
+{
     FLASH->KEYR = FLASH_KEY1;
     FLASH->KEYR = FLASH_KEY2;
 }
 
-void FlashLock(void) {
-    FlashWaitBusy();
-    FLASH->CR |= FLASH_CR_LOCK;
-    FlashWaitBusy();
-}
-
-/**
-  * @brief  This function erases a page of flash.
-  *         The Page Erase bit (PER) is set at the beginning and reset at the end
-  *         of the function, in case of successive erase, these two operations
-  *         could be performed outside the function.
-  * @param  page_addr is an address inside the page to erase
-  * @retval None
-  */
-void FlashErase(uint32_t page_addr) {
-  /* (1) Set the PER bit in the FLASH_CR register to enable page erasing */
-  /* (2) Program the FLASH_AR register to select a page to erase */
-  /* (3) Set the STRT bit in the FLASH_CR register to start the erasing */
-  /* (4) Wait until the BSY bit is reset in the FLASH_SR register */
-  /* (5) Check the EOP flag in the FLASH_SR register */
-  /* (6) Clear EOP flag by software by writing EOP at 1 */
-  /* (7) Reset the PER Bit to disable the page erase */
-  FLASH->CR |= FLASH_CR_PER; /* (1) */    
-  FLASH->AR =  page_addr; /* (2) */    
-  FLASH->CR |= FLASH_CR_STRT; /* (3) */    
-
-  FlashWaitBusy(); /* (4) */ 
-
-  if ((FLASH->SR & FLASH_SR_EOP) != 0)  /* (5) */
-  {  
-    FLASH->SR |= FLASH_SR_EOP; /* (6)*/
-  }
-  
-  FLASH->CR &= ~FLASH_CR_PER; /* (7) */
-}
-
-/**
-  * @brief  This function checks that the whole page has been correctly erased
-  *         A word is erased while all its bits are set.
-  * @param  first_page_addr is the first address of the page to erase
-  * @retval -1 if error or 0 if not
-  */
-uint8_t CheckFlashErase(uint32_t first_page_addr)
+/* Clears PG/PER and sets LOCK in one write */
+static void FlashLock(void)
 {
-uint32_t i;  
+    FLASH->CR = FLASH_CR_LOCK;
+}
 
-  for (i=FLASH_PAGE_SIZE; i > 0; i-=4) /* Check the erasing of the page by reading all the page value */
-  {
-    if (*(uint32_t *)(first_page_addr + i - 4) != (uint32_t)0xFFFFFFFF) /* compare with erased value, all bits at1 */
+/**
+  * @brief  Compares flash with a source buffer.
+  * @param  step: 1 - compare with src[], 0 - compare every word with *src
+  * @retval 1 if equal, 0 otherwise
+  */
+static uint32_t FlashMatches(const uint32_t *src, uint32_t addr, uint32_t len, uint32_t step)
+{
+    const volatile uint32_t *p = (const volatile uint32_t *)addr;
+    for (; len; len -= 4, src += step)
     {
-      return 0; /* report the error to the main progran */
+        if (*p++ != *src)
+            return 0;
     }
-  }
-  
-  return 1;
+    return 1;
 }
 
-/**
-  * @brief  This function programs a 16-bit word.
-  *         The Programming bit (PG) is set at the beginning and reset at the end
-  *         of the function, in case of successive programming, these two operations
-  *         could be performed outside the function.
-  *         This function waits the end of programming, clears the appropriate bit in 
-  *         the Status register and eventually reports an error. 
-  * @param  flash_addr is the address to be programmed
-  *         data is the 16-bit word to program
-  * @retval None
-  */
-void FlashWord16Prog(uint32_t flash_addr, uint16_t data)
-{    
-  /* (1) Set the PG bit in the FLASH_CR register to enable programming */
-  /* (2) Perform the data write (half-word) at the desired address */
-  /* (3) Wait until the BSY bit is reset in the FLASH_SR register */
-  /* (4) Check the EOP flag in the FLASH_SR register */
-  /* (5) clear it by software by writing it at 1 */
-  /* (6) Reset the PG Bit to disable programming */
-  FLASH->CR |= FLASH_CR_PG; /* (1) */
-  
-  *(__IO uint16_t*)(flash_addr) = data; /* (2) */
-  
-  FlashWaitBusy(); /* (3) */
-
-  if ((FLASH->SR & FLASH_SR_EOP) != 0)  /* (4) */
-  {
-    FLASH->SR |= FLASH_SR_EOP; /* (5) */
-  }
-  
-  FLASH->CR &= ~FLASH_CR_PG; /* (6) */
-}
-
-void FlashProgram (const uint32_t *pulData, uint32_t ulAddress, uint32_t ulCount )
+static void UART_send(const void *data, uint32_t len)
 {
-  for(int i=0; i<ulCount;  i+=4, ulAddress += 4,  pulData++)
-  {
-      FlashWord16Prog(ulAddress, (uint16_t)*pulData);
-      FlashWord16Prog(ulAddress + 2, (uint16_t)(*pulData >> 16));   
-  }
-}
-
-uint8_t FlashVerify (const uint32_t *pulData, uint32_t ulAddress, uint32_t ulCount )
-{
-  for(int i=0; i<ulCount;  i+=4, ulAddress += 4,  pulData++)
-  {  
-    if(*pulData != (*(__IO uint32_t*) (ulAddress)))
+    const uint8_t *d = (const uint8_t *)data;
+    for (; len; --len)
     {
-      return 0;
+        while (!(USART1->ISR & USART_ISR_TXE)) {}
+        USART1->TDR = *d++;
     }
-  }
-  return 1;
 }
 
-void UART_sendByte(uint8_t b) {
-    while(!(USART1->ISR & USART_ISR_TXE)) {}
-
-    USART1->TDR = b;
-}
-
-void UART_send(const uint8_t* d, uint32_t l) {
-    for(; l > 0; ++d, --l)
-        UART_sendByte(*d);
-}
-
-void SysTickISR(void) {
-    ++timeTick;
-}
-
-void USART1_IRQHandler(void)
-{   
-  if((USART1->ISR & USART_ISR_IDLE) == USART_ISR_IDLE)
-  {
-      USART1->ICR |= USART_ICR_IDLECF; /* Clear Idle line flag */
-  
-      DMA1_Channel3->CCR &=~ DMA_CCR_EN;
-      DMA1_Channel3->CNDTR = DMA_BUFF_SIZE;/* Data size */
-      DMA1_Channel3->CCR |= DMA_CCR_EN;
-  
-      State = State_Start;   
-  }
-}
-
-static void jumpToApp(void) {
-  
-    __disable_irq();
-    
-    SYSCFG->CFGR1 = (SYSCFG->CFGR1 & ~SYSCFG_CFGR1_MEM_MODE) | SYSCFG_CFGR1_MEMMODE_SRAM;
-    
-    __DSB(); // Обеспечиваем завершение всех операций с памятью
-    
-    volatile uint32_t* appBegin = (volatile uint32_t*)APPLICATION_ADDRESS;
-    uint32_t stack = appBegin[0];  // Начальное значение MSP из вектора приложения
-    uint32_t start = appBegin[1];  // Адрес обработчика сброса приложения
-    
-    __set_MSP(stack);   // Устанавливаем новый стек с помощью CMSIS-функции
-    
-    // Переход по адресу сброса приложения
-    __asm volatile("bx %0" : : "r"(start));
-}
-
-static void InitHardware(void) {
- 
-  //RCC->APB2RSTR |= RCC_APB2ENR_SYSCFGEN; 
-  SYSCFG->CFGR1 = (SYSCFG->CFGR1 & ~SYSCFG_CFGR1_MEM_MODE) | SYSCFG_CFGR1_MEMMODE_FLASH;
-  /* Enable the peripheral clock of GPIOA */
-  RCC->AHBENR   |=   RCC_AHBENR_GPIOAEN;
-  /* Enable the peripheral clock USART1 */
-  RCC->APB2ENR  |=   RCC_APB2ENR_USART1EN;
-  /* Enable the peripheral clock DMA1 */
-  RCC->AHBENR   |=   RCC_AHBENR_DMA1EN;
-  /* Enable the peripheral clock of CRC */
-  RCC->AHBENR   |=   RCC_AHBENR_CRCEN;
-  
-  CRC_Init(0xFFFFFFFF);
-  
-  /* GPIO configuration for USART1 signals */
-  /* (1) Select AF mode on PA2 and PA3 */
-  /* (2) AF1 for USART1 signals */
-  GPIOA->MODER = (GPIOA->MODER & ~(GPIO_MODER_MODER2 | GPIO_MODER_MODER3))\
-                 | (GPIO_MODER_MODER2_1 | GPIO_MODER_MODER3_1); /* (1) */
-  
-  GPIOA->AFR[0] = (GPIOA->AFR[0] &~ (GPIO_AFRL_AFR2 | GPIO_AFRL_AFR3))\
-                  | (1 << (2 * 4)) | (1 << (3 * 4)); /* (2) */
-  
-  /* DMA1 Channel2 USART_RX config */
-  /* (4)  Peripheral address */
-  /* (5)  Memory address */
-  /* (6)  Data size */
-  /* (7)  Memory increment */
-  /*      Peripheral to memory*/
-  /*      8-bit transfer */
-  DMA1_Channel3->CPAR = (uint32_t)&(USART1->RDR); /* (4) */
-  DMA1_Channel3->CMAR = (uint32_t)buff; /* (5) */
-  DMA1_Channel3->CNDTR = DMA_BUFF_SIZE; /* (6) */
-  DMA1_Channel3->CCR |= DMA_CCR_MINC | DMA_CCR_EN; /* (7) */ 
-  
-  /* Configure USART1 */
-  USART1->BRR = CPU_FREQ / BAUD_RATE;
-  /* Enable DMA in reception */
-  USART1->CR3 = USART_CR3_DMAR;   
-  /* Enable Uart */
-  /* Enable IDLE interrupt */ 
-  USART1->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE | USART_CR1_IDLEIE;
-  
-  /* polling idle frame Transmission */
-  while((USART1->ISR & USART_ISR_IDLE) != USART_ISR_IDLE)
-  { 
-    /* add time out here for a robust application */
-  }
-  USART1->ICR |= USART_ICR_IDLECF;/* Clear TC flag */
-
-  /* Configure IT */
-  
-  /*  Set priority for SysTick_IRQn */
-  /*  Enable SysTick_IRQn */ 
-  SysTick_Config(CPU_FREQ / 1000);
-  NVIC_SetPriority(SysTick_IRQn, 2); 
-  NVIC_EnableIRQ(SysTick_IRQn);
-
-  /*  Set priority for USART1_IRQn */
-  /*  Enable USART1_IRQn */
-  NVIC_SetPriority(USART1_IRQn, 1);
-  NVIC_EnableIRQ(USART1_IRQn);   
-
-   __enable_irq ();  
-}
-
-static void DeInitHardware(void) {
-    
-    NVIC_DisableIRQ(SysTick_IRQn);
-    NVIC_DisableIRQ(USART1_IRQn);
-
-    // all changed registers to their reset-values
-    SysTick->CTRL = 0;
-    SysTick->LOAD = 0;
-    SysTick->VAL  = 0;
-    
-    USART1->CR1  = 0;
-    USART1->BRR  = 0;
-
-    GPIOA->MODER = 0x28000000;
-    GPIOA->PUPDR = 0x24000000;
-    GPIOA->AFR[0]= 0;
-    GPIOA->AFR[1]= 0;
-    GPIOA->ODR   = 0;
-
-    RCC->APB2ENR = 0;
-    RCC->AHBENR  = 0x00000014;
-
-}
-
-static void Connect(void)
+/* Header-only reply: CRC over the 16 header bytes with crc = 0 */
+static void SendStatus(uint32_t cmd)
 {
-    P_Header *pkt  = (P_Header *)&buff[0];
-    connected = 1;
-   
-    pkt->cmd  = (uint32_t)Command_Connect | (uint32_t)Command_OK;
+    P_Header *pkt = (P_Header *)buff;
+
+    pkt->cmd  = cmd;
     pkt->addr = 0;
     pkt->size = 0;
     pkt->crc  = 0;
-    pkt->crc  = CRC_Calc((const uint32_t*)pkt, sizeof(P_Header));
-    
-    UART_send((const uint8_t*)buff, (sizeof(P_Header)));
+    pkt->crc  = CRC_Calc((const uint32_t *)pkt, sizeof(P_Header));
+
+    UART_send(buff, sizeof(P_Header));
 }
 
-static void GetInfo(void) {
-    P_Header *pkt  = (P_Header *)&buff[0];
-    P_Info   *info = (P_Info   *)&buff[BOOT_HEADER_SIZE];
-    
-    info->v = BOOT_VERSION;
-    info->p = PRODUCT_ID;
-    info->b = BLOCK_SIZE;
-    info->s = FLASH_PAGE_SIZE;
-    
+static void GetInfo(void)
+{
+    P_Header *pkt = (P_Header *)buff;
+
     pkt->cmd  = (uint32_t)Command_GetInfo | (uint32_t)Command_OK;
     pkt->addr = 0;
     pkt->size = sizeof(P_Info);
-    pkt->crc  = 0;
-    pkt->crc  = CRC_Calc((const uint32_t*)info, sizeof(P_Info));
+    pkt->crc  = CRC_Calc((const uint32_t *)&bootInfo, sizeof(P_Info));
 
-    UART_send((const uint8_t*)buff, (sizeof(P_Header) + sizeof(P_Info)));
+    UART_send(buff, sizeof(P_Header));
+    UART_send(&bootInfo, sizeof(P_Info));
 }
 
-static void Erase(void) {
-    P_Header *pkt  = (P_Header *)&buff[0];
-    uint8_t ret = 1;
-    
+static uint32_t Erase(void)
+{
     FlashUnlock();
-    for(uint32_t p = APPLICATION_ADDRESS; p < APPLICATION_FLASH_END; p += FLASH_PAGE_SIZE)
-        FlashErase(p);
-    FlashLock();
-    
-    for(uint32_t p = APPLICATION_ADDRESS; p < APPLICATION_FLASH_END; p += FLASH_PAGE_SIZE)
-       ret &= CheckFlashErase(p);
-    
-    pkt->cmd  = (uint32_t)Command_Erase | (ret ? (uint32_t)Command_OK : (uint32_t)Command_Error);
-    pkt->addr = 0;
-    pkt->size = 0;
-    pkt->crc  = 0;
-    pkt->crc  = CRC_Calc((const uint32_t*)pkt, sizeof(P_Header));
-    
-    UART_send((const uint8_t*)buff, (sizeof(P_Header)));
-}
-
-static void WritePage(void) {
-    P_Header *pkt  = (P_Header *)&buff[0];
-  
-    const uint32_t* data = (const uint32_t*)&buff[BOOT_HEADER_SIZE];
-    uint32_t writeAddr = APPLICATION_ADDRESS + pkt->addr;
-    int32_t writeLen = pkt->size;
-    
-    uint8_t ret = 1;
-    
-    uint32_t crc = CRC_Calc(data, writeLen);
-    
-    if(crc != pkt->crc)
+    FLASH->CR = FLASH_CR_PER;
+    for (uint32_t p = APPLICATION_ADDRESS; p < APPLICATION_FLASH_END; p += FLASH_PAGE_SIZE)
     {
-        ret = 0;
+        FLASH->AR = p;
+        FLASH->CR = FLASH_CR_PER | FLASH_CR_STRT;
+        FlashWaitBusy();
     }
-    
-    if(writeAddr <= APPLICATION_FLASH_END && writeAddr >= APPLICATION_ADDRESS && ret)
-    {   
-      FlashUnlock();
-        FlashProgram(data, writeAddr, writeLen);
-      FlashLock();
-      
-      ret = FlashVerify(data, writeAddr, writeLen);
-    }
-    
-    pkt->cmd  = (uint32_t)Command_WritePage | (ret ? (uint32_t)Command_OK : (uint32_t)Command_Error);
-    pkt->addr = 0;
-    pkt->size = 0;
-    pkt->crc  = 0;
-    pkt->crc  = CRC_Calc((const uint32_t*)pkt, sizeof(P_Header));
-    
-    UART_send((const uint8_t*)buff, (sizeof(P_Header)));
+    FlashLock();
+
+    return FlashMatches(&erasedWord, APPLICATION_ADDRESS, APPLICATION_SIZE, 0)
+           ? Command_OK : Command_Error;
 }
 
-static void Reset(void) {
-    NVIC_SystemReset();
+static uint32_t WritePage(void)
+{
+    const P_Header *pkt  = (const P_Header *)buff;
+    const uint32_t *data = (const uint32_t *)&buff[BOOT_HEADER_SIZE];
+    uint32_t offset = pkt->addr;
+    uint32_t len    = pkt->size;
+
+    /* The page must fit into the receive buffer and the application area,
+       and be word aligned. Checked before the CRC so that CRC_Calc never
+       reads beyond buff[]. */
+    if (len == 0 || len > FLASH_PAGE_SIZE || ((len | offset) & 3) != 0 ||
+        offset > APPLICATION_SIZE - len ||
+        CRC_Calc(data, len) != pkt->crc)
+    {
+        return Command_Error;
+    }
+
+    uint32_t addr = APPLICATION_ADDRESS + offset;
+    const uint16_t *src = (const uint16_t *)data;
+    volatile uint16_t *dst = (volatile uint16_t *)addr;
+
+    FlashUnlock();
+    FLASH->CR = FLASH_CR_PG;              /* PG stays set for the whole page */
+    for (uint32_t n = len; n; n -= 2)
+    {
+        *dst++ = *src++;
+        FlashWaitBusy();
+    }
+    FlashLock();
+
+    return FlashMatches(data, addr, len, 1) ? Command_OK : Command_Error;
+}
+
+/**
+  * @brief  Checks that the application vector table looks valid:
+  *         initial SP inside SRAM, reset handler inside the application area (Thumb).
+  * @retval 1 if the application can be started, 0 otherwise
+  */
+static uint32_t IsAppValid(void)
+{
+    const volatile uint32_t *app = (const volatile uint32_t *)APPLICATION_ADDRESS;
+    uint32_t stack = app[0];
+    uint32_t start = app[1];
+
+    return stack > SRAM_START && stack <= SRAM_START + SRAM_SIZE_MAX && (stack & 3) == 0 &&
+           (start & 1) != 0 && start >= APPLICATION_ADDRESS && start < APPLICATION_FLASH_END;
+}
+
+static void InitHardware(void)
+{
+    /* Clocks: GPIOA, DMA1, CRC, USART1 */
+    RCC->AHBENR  |= RCC_AHBENR_GPIOAEN | RCC_AHBENR_DMA1EN | RCC_AHBENR_CRCEN;
+    RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
+
+    /* PA2/PA3 alternate function AF1 (USART1). Runs right after reset, so the
+       registers hold their reset values and can be written directly
+       (MODER keeps PA13/PA14 in AF mode for SWD). */
+    GPIOA->MODER  = 0x28000000 | GPIO_MODER_MODER2_1 | GPIO_MODER_MODER3_1;
+    GPIOA->AFR[0] = (1 << (2 * 4)) | (1 << (3 * 4));
+
+    /* DMA1 Channel3: USART1_RX -> buff, memory increment, 8-bit */
+    DMA1_Channel3->CPAR  = (uint32_t)&(USART1->RDR);
+    DMA1_Channel3->CMAR  = (uint32_t)buff;
+    DMA1_Channel3->CNDTR = DMA_BUFF_SIZE;
+    DMA1_Channel3->CCR   = DMA_CCR_MINC | DMA_CCR_EN;
+
+    USART1->BRR = CPU_FREQ / BAUD_RATE;
+    USART1->CR3 = USART_CR3_DMAR;
+    USART1->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
+
+    /* Wait for the idle frame after enabling the receiver and discard it */
+    while (!(USART1->ISR & USART_ISR_IDLE)) {}
+    USART1->ICR = USART_ICR_IDLECF;
+
+    /* SysTick: 1 ms period, polled via COUNTFLAG (no interrupt) */
+    SysTick->LOAD = CPU_FREQ / 1000 - 1;
+    SysTick->VAL  = 0;
+    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_ENABLE_Msk;
+}
+
+static void DeInitHardware(void)
+{
+    SysTick->CTRL = 0;
+    SysTick->LOAD = 0;
+    SysTick->VAL  = 0;
+
+    DMA1_Channel3->CCR = 0;
+
+    /* Return USART1 and GPIOA to their reset state */
+    RCC->APB2RSTR = RCC_APB2RSTR_USART1RST;
+    RCC->APB2RSTR = 0;
+    RCC->AHBRSTR  = RCC_AHBRSTR_GPIOARST;
+    RCC->AHBRSTR  = 0;
+
+    RCC->APB2ENR = 0;
+    RCC->AHBENR  = RCC_AHBENR_RESET;
+}
+
+__attribute__((noreturn))
+static void jumpToApp(void)
+{
+    __disable_irq();          /* the application starts with PRIMASK = 1, as before */
+    DeInitHardware();
+
+    const volatile uint32_t *app = (const volatile uint32_t *)APPLICATION_ADDRESS;
+    uint32_t stack = app[0];  // Initial MSP from the application vector table
+    uint32_t start = app[1];  // Application reset handler address
+
+    __set_MSP(stack);         // Switch to the application stack (CMSIS)
+
+    // Jump to the application reset handler
+    __asm volatile("bx %0" : : "r"(start));
+    __builtin_unreachable();
 }
 
 void exit(int status) {
-    (void)status; 
+    (void)status;
     while(1);
 }
 
 int main(void) {
-  
-    P_Header *pkt  = (P_Header *)&buff[0];
-    
-    connected = 0;
-  
+
+    const P_Header *pkt = (const P_Header *)buff;
+    uint32_t timeout = COMM_TIMEOUT;   /* ms left; 0 = timeout disabled */
+
     InitHardware();
-       
+
     while(1) {
-   
-        if(timeTick >= COMM_TIMEOUT) {
-            if(!connected) {
-                DeInitHardware();
+
+        /* Startup timeout: runs until Connect or until the application is started */
+        if (timeout && (SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk) && --timeout == 0) {
+            if (IsAppValid())
                 jumpToApp();
-             }
+            /* no valid application: the timeout stays disabled, keep waiting for the host */
         }
-   
-        if(State == State_Start) {
-            switch(pkt->cmd) {
-                case Command_Connect:    
-                  Connect();      break;
-                case Command_GetInfo:    
-                  GetInfo();      break;
-                case Command_Erase:      
-                  Erase();        break;
-                case Command_WritePage:  
-                  WritePage();    break;
-                case Command_Reset:      
-                  Reset();        break;
-                default: 
-                  UART_sendByte((uint8_t)Command_Error);
+
+        /* End of packet: restart DMA for the next one, then process this one */
+        if (USART1->ISR & USART_ISR_IDLE) {
+            USART1->ICR = USART_ICR_IDLECF;
+
+            DMA1_Channel3->CCR   = DMA_CCR_MINC;
+            DMA1_Channel3->CNDTR = DMA_BUFF_SIZE;
+            DMA1_Channel3->CCR   = DMA_CCR_MINC | DMA_CCR_EN;
+
+            switch (pkt->cmd) {
+                case Command_Connect:
+                    timeout = 0;
+                    SendStatus((uint32_t)Command_Connect | (uint32_t)Command_OK);
+                    break;
+                case Command_GetInfo:
+                    GetInfo();
+                    break;
+                case Command_Erase:
+                    SendStatus((uint32_t)Command_Erase | Erase());
+                    break;
+                case Command_WritePage:
+                    SendStatus((uint32_t)Command_WritePage | WritePage());
+                    break;
+                case Command_Reset:
+                    NVIC_SystemReset();
+                    break;
+                default: {
+                    static const uint8_t err = Command_Error;
+                    UART_send(&err, 1);
+                }
             }
-            State = State_Done;
         }
     }
 }
