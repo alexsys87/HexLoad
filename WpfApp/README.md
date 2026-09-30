@@ -3,8 +3,9 @@
 Host application for flashing STM32 microcontrollers through a custom UART bootloader,
 combined with a firmware file viewer and converter.
 
-Windows, WPF, .NET 8. The matching bootloader firmware for STM32F030 is in
-[`../Firmware/bl_f030`](../Firmware/bl_f030) (see the [project README](../README.md)).
+Windows, WPF, .NET 8. The matching bootloader firmware (see the [project README](../README.md)):
+[`../Firmware/bl_f030`](../Firmware/bl_f030) for STM32F030 and
+[`../Firmware/bl_f103`](../Firmware/bl_f103) for STM32F103C8 (Blue Pill). Both use the same protocol.
 
 ## Features
 
@@ -57,6 +58,7 @@ HEX / S-record / TI-TXT images must be linked for the application address (`0x08
 | `SettingsWindow.xaml(.cs)` | COM port, baud rate and application address |
 | `ProgressWindow.xaml(.cs)` | Programming progress with cancel |
 | `../Firmware/bl_f030/App/main.c` | Bootloader firmware for STM32F030 (register level, no HAL) |
+| `../Firmware/bl_f103/App/main.c` | Bootloader firmware for STM32F103C8 / Blue Pill (register level, no HAL) |
 
 Tunable `Bootloader` properties:
 
@@ -139,8 +141,12 @@ struct boot_info {
 };
 ```
 
-The application area size is `pages * page_size`. The reference firmware reports
-14 pages of 1024 bytes (16 KB device, 2 KB bootloader, 14 KB application).
+The application area size is `pages * page_size`. The reference firmware reports:
+
+| Firmware | Pages | Page size | Layout |
+|---|---|---|---|
+| `bl_f030` (STM32F030F4) | 14 | 1024 | 16 KB device, 2 KB bootloader, 14 KB application |
+| `bl_f103` (STM32F103C8) | 62 | 1024 | 64 KB device, 2 KB bootloader, 62 KB application |
 
 ## Programming sequence
 
@@ -266,19 +272,38 @@ uint32_t stm32_crc32(const void *buf, size_t len)
 
 - No interrupts are used: the main loop polls the USART IDLE flag and the SysTick `COUNTFLAG`.
   Only the first four vector table entries (initial SP, Reset, NMI, HardFault) are ever fetched,
-  so `startup.c` uses a 4-entry vector table instead of the full 48-entry one.
+  so `startup.c` uses a 4-entry vector table instead of the full one
+  (48 entries on the STM32F030, 59 on the STM32F103).
 - Size with GCC `-Os -ffunction-sections -fdata-sections -Wl,--gc-sections` (vectors + code):
-  1076 bytes with the full vector table, 900 bytes with the 4-entry table.
+
+  | Firmware | Full vector table | 4-entry table |
+  |---|---|---|
+  | `bl_f030` (Cortex-M0) | 1076 bytes | 900 bytes |
+  | `bl_f103` (Cortex-M3) | 1072 bytes | 852 bytes |
+
   With the short table the bootloader fits into one 1 KB page; the application area could then
-  start at `0x08000400` (`APPLICATION_ADDRESS`, `BLOCK_SIZE = 15`, application linker script and the
+  start at `0x08000400` (`APPLICATION_ADDRESS`, `BLOCK_SIZE` + 1, application linker script and the
   HexLoad *App address* setting changed accordingly) - the protocol itself does not change.
 
 ## Application requirements
+
+Both bootloaders start the application at `0x08000800` with the core running from HSI 8 MHz and
+the peripherals used by the bootloader returned to their reset state.
+
+STM32F030 (`bl_f030`):
 
 - Link the application for `0x08000800` (flash origin `0x08000800`, length 14 KB).
 - The Cortex-M0 has no `VTOR`: the application must copy its vector table to the start of SRAM
   (reserve 192 bytes there), remap SRAM to address 0 via `SYSCFG->CFGR1.MEM_MODE`, and then call
   `__enable_irq()` - the bootloader starts the application with interrupts disabled (`PRIMASK = 1`).
+
+STM32F103 (`bl_f103`):
+
+- Link the application for `0x08000800` (flash origin `0x08000800`, length 62 KB).
+- The bootloader sets `SCB->VTOR = 0x08000800` and starts the application with interrupts enabled
+  (`PRIMASK = 0`, as after reset). If the application's `SystemInit()` writes `VTOR` itself (older
+  CMSIS / CubeF1 versions do it unconditionally), set `VECT_TAB_OFFSET` to `0x800`
+  (in newer versions also define `USER_VECT_TAB_ADDRESS`).
 
 ---
 
