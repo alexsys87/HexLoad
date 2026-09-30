@@ -1,7 +1,7 @@
-﻿<Window x:Class="HexLoad.ProgressWindow"
+<Window x:Class="HexLoad.ProgressWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Programming Progress" Height="150" Width="400"
+        Title="Programming Progress" Height="160" Width="400"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize" ShowInTaskbar="False">
     <Grid Margin="10">
         <Grid.RowDefinitions>
@@ -11,6 +11,7 @@
         </Grid.RowDefinitions>
         <TextBlock x:Name="StatusText" Text="Programming..." Margin="0,0,0,5"/>
         <ProgressBar x:Name="ProgressBar" Grid.Row="1" Minimum="0" Maximum="100" Value="0" Height="20"/>
-        <Button x:Name="CancelButton" Grid.Row="2" Content="Cancel" Width="75" Height="25" Margin="0,10,0,0" HorizontalAlignment="Right" Click="CancelButton_Click"/>
+        <Button x:Name="CancelButton" Grid.Row="2" Content="Cancel" Width="75" Height="25" Margin="0,10,0,0"
+                HorizontalAlignment="Right" Click="CancelButton_Click"/>
     </Grid>
 </Window>

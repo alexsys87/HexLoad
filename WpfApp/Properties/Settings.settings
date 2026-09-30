@@ -6,7 +6,10 @@
       <Value Profile="(Default)" />
     </Setting>
     <Setting Name="BaudRate" Type="System.Int32" Scope="User">
-      <Value Profile="(Default)">0</Value>
+      <Value Profile="(Default)">115200</Value>
+    </Setting>
+    <Setting Name="AppAddress" Type="System.String" Scope="User">
+      <Value Profile="(Default)">0x08000800</Value>
     </Setting>
   </Settings>
 </SettingsFile>

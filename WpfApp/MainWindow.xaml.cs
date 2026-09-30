@@ -1,8 +1,8 @@
-﻿using Microsoft.Win32;
+using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
-using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,70 +15,143 @@ namespace HexLoad
 {
     public partial class MainWindow : Window
     {
-        private byte[]? _currentFileData = null;
-        private int _currentMode = 1;
-        private int _startOffset = 0;
+        /// <summary>Maximum number of rows built for the hex view at once (1 MB of data).</summary>
+        private const int MaxViewRows = 65536;
+
+        /// <summary>Log length at which the older half of the log is dropped, characters.</summary>
+        private const int MaxLogLength = 200_000;
+
+        private FirmwareImage? _image;
+        private int _currentMode = 1;      // 1 / 2 / 4 bytes per cell
+        private int _viewOffset;           // hex view scroll offset (view only, never affects programming)
+        private string _lastFileName = "firmware";
 
         private Bootloader? _bootloader;
         private CancellationTokenSource? _connectCts;
-        private CancellationTokenSource? _programCts;
+        private bool _busy;                // guards against concurrent port operations
+
+        /// <summary>Cached "00".."FF" strings - avoids allocations when building the hex view.</summary>
+        private static readonly string[] ByteText = CreateByteText();
+
+        private static string[] CreateByteText()
+        {
+            var t = new string[256];
+            for (int i = 0; i < 256; i++) t[i] = i.ToString("X2", CultureInfo.InvariantCulture);
+            return t;
+        }
 
         public MainWindow()
         {
             InitializeComponent();
             UpdatePortDisplay();
-            this.Closing += MainWindow_Closing;
+            Closing += MainWindow_Closing;
         }
 
         private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
-            _bootloader?.Dispose();
+            // Cancel first, then dispose - otherwise a running operation may touch a closed port
             _connectCts?.Cancel();
-            _programCts?.Cancel();
+            _bootloader?.Dispose();
+            _bootloader = null;
         }
 
-        // ==== Вспомогательные методы ====
+        // ==================== Helpers ====================
+
         private void Log(string message)
         {
-            if (Dispatcher.CheckAccess())
-            {
-                LogTextBox.AppendText(message + Environment.NewLine);
-                LogTextBox.ScrollToEnd();
-            }
-            else
+            if (!Dispatcher.CheckAccess())
             {
                 Dispatcher.InvokeAsync(() => Log(message));
+                return;
             }
+
+            if (LogTextBox.Text.Length > MaxLogLength)
+            {
+                // Drop the older half so the TextBox does not grow without bound
+                string text = LogTextBox.Text;
+                int cut = text.IndexOf('\n', text.Length / 2);
+                LogTextBox.Text = cut >= 0 ? text.Substring(cut + 1) : string.Empty;
+            }
+
+            LogTextBox.AppendText(message + Environment.NewLine);
+            LogTextBox.ScrollToEnd();
         }
 
         private void UpdatePortDisplay()
         {
             string port = Settings.Default.ComPort;
             int baud = Settings.Default.BaudRate;
-            ComPortTextBlock.Text = $"COM Port: {port}";
+            ComPortTextBlock.Text = "COM Port: " + (string.IsNullOrEmpty(port) ? "(not set)" : port);
             BaudRateTextBlock.Text = $"Baudrate: {baud}";
         }
 
-        // ==== Класс для отображения HEX ====
-        public class HexRow
+        /// <summary>Disables menu items while the port is in use (no concurrent commands).</summary>
+        private void SetBusy(bool busy)
         {
-            public string Address { get; set; } = string.Empty;
-            public string B0 { get; set; } = string.Empty; public string B1 { get; set; } = string.Empty;
-            public string B2 { get; set; } = string.Empty; public string B3 { get; set; } = string.Empty;
-            public string B4 { get; set; } = string.Empty; public string B5 { get; set; } = string.Empty;
-            public string B6 { get; set; } = string.Empty; public string B7 { get; set; } = string.Empty;
-            public string B8 { get; set; } = string.Empty; public string B9 { get; set; } = string.Empty;
-            public string BA { get; set; } = string.Empty; public string BB { get; set; } = string.Empty;
-            public string BC { get; set; } = string.Empty; public string BD { get; set; } = string.Empty;
-            public string BE { get; set; } = string.Empty; public string BF { get; set; } = string.Empty;
-            public string Ascii { get; set; } = string.Empty;
+            _busy = busy;
+            MenuErase.IsEnabled = !busy;
+            MenuReset.IsEnabled = !busy;
+            MenuProgram.IsEnabled = !busy;
+            MenuOpen.IsEnabled = !busy;
+            MenuOptions.IsEnabled = !busy;
+            System.Windows.Input.Mouse.OverrideCursor = busy ? System.Windows.Input.Cursors.Wait : null;
+        }
+
+        private bool RequireConnection()
+        {
+            if (_bootloader == null)
+            {
+                Log("Not connected. Use Target -> Connect first.");
+                return false;
+            }
+            return true;
+        }
+
+        // ==================== Hex view row model ====================
+
+        public sealed class HexRow
+        {
+            private readonly string[] _cells;
+
+            public HexRow(string address, string[] cells, string ascii)
+            {
+                Address = address;
+                _cells = cells;
+                Ascii = ascii;
+            }
+
+            public string Address { get; }
+            public string Ascii { get; }
+
+            // XAML bindings; indexed access instead of reflection
+            public string B0 => _cells[0];
+            public string B1 => _cells[1];
+            public string B2 => _cells[2];
+            public string B3 => _cells[3];
+            public string B4 => _cells[4];
+            public string B5 => _cells[5];
+            public string B6 => _cells[6];
+            public string B7 => _cells[7];
+            public string B8 => _cells[8];
+            public string B9 => _cells[9];
+            public string BA => _cells[10];
+            public string BB => _cells[11];
+            public string BC => _cells[12];
+            public string BD => _cells[13];
+            public string BE => _cells[14];
+            public string BF => _cells[15];
         }
 
         private void RefreshHexView()
         {
-            if (_currentFileData == null) return;
+            if (_image == null || _image.Data.Length == 0)
+            {
+                HexGrid.ItemsSource = null;
+                return;
+            }
 
-            var rows = new List<HexRow>();
+            byte[] data = _image.Data;
+            uint baseAddr = _image.BaseAddress;
             int activeCols = 16 / _currentMode;
 
             for (int c = 1; c <= 16; c++)
@@ -87,472 +160,228 @@ namespace HexLoad
                 if (c <= activeCols)
                 {
                     column.Visibility = Visibility.Visible;
-                    column.Header = ((c - 1) * _currentMode).ToString("X");
-                    column.Width = _currentMode == 4 ? 90 : (_currentMode == 2 ? 60 : 35);
+                    column.Header = ((c - 1) * _currentMode).ToString("X", CultureInfo.InvariantCulture);
+                    column.Width = _currentMode == 4 ? 90 : _currentMode == 2 ? 60 : 35;
                 }
-                else column.Visibility = Visibility.Collapsed;
+                else
+                {
+                    column.Visibility = Visibility.Collapsed;
+                }
             }
 
-            for (int i = _startOffset; i < _currentFileData.Length; i += 16)
+            int start = _viewOffset & ~15;                       // align view start to 16 bytes
+            int totalRows = (data.Length - start + 15) / 16;
+            int rowCount = Math.Min(totalRows, MaxViewRows);
+
+            var rows = new List<HexRow>(rowCount);
+            var ascii = new char[16];
+
+            for (int r = 0; r < rowCount; r++)
             {
-                var row = new HexRow { Address = i.ToString("X4") };
+                int i = start + r * 16;
+                var cells = new string[16];
 
-                for (int j = 0; j < activeCols; j++)
+                for (int j = 0; j < 16; j++)
                 {
-                    int offset = i + (j * _currentMode);
-                    string hexVal = "";
+                    if (j >= activeCols) { cells[j] = string.Empty; continue; }
 
-                    if (offset < _currentFileData.Length)
-                    {
-                        if (_currentMode == 4 && offset + 3 < _currentFileData.Length)
-                            hexVal = BitConverter.ToUInt32(_currentFileData, offset).ToString("X8");
-                        else if (_currentMode == 2 && offset + 1 < _currentFileData.Length)
-                            hexVal = BitConverter.ToUInt16(_currentFileData, offset).ToString("X4");
-                        else
-                            hexVal = _currentFileData[offset].ToString("X2");
-                    }
-                    else hexVal = "--";
+                    int offset = i + j * _currentMode;
+                    if (offset >= data.Length) { cells[j] = "--"; continue; }
 
-                    string propName = j < 10 ? $"B{j}" : $"B{(char)('A' + j - 10)}";
-                    typeof(HexRow).GetProperty(propName)?.SetValue(row, hexVal);
+                    if (_currentMode == 4)
+                        cells[j] = offset + 3 < data.Length
+                            ? BitConverter.ToUInt32(data, offset).ToString("X8", CultureInfo.InvariantCulture)
+                            : ByteText[data[offset]];
+                    else if (_currentMode == 2)
+                        cells[j] = offset + 1 < data.Length
+                            ? BitConverter.ToUInt16(data, offset).ToString("X4", CultureInfo.InvariantCulture)
+                            : ByteText[data[offset]];
+                    else
+                        cells[j] = ByteText[data[offset]];
                 }
 
-                StringBuilder sb = new StringBuilder();
                 for (int k = 0; k < 16; k++)
                 {
                     int offset = i + k;
-                    if (offset < _currentFileData.Length)
+                    if (offset < data.Length)
                     {
-                        char c = (char)_currentFileData[offset];
-                        sb.Append((c < 32 || c > 126) ? "." : c.ToString());
+                        byte b = data[offset];
+                        ascii[k] = b < 32 || b > 126 ? '.' : (char)b;
                     }
-                    else sb.Append(" ");
+                    else ascii[k] = ' ';
                 }
-                row.Ascii = sb.ToString();
-                rows.Add(row);
+
+                rows.Add(new HexRow(
+                    (baseAddr + (uint)i).ToString("X8", CultureInfo.InvariantCulture),
+                    cells,
+                    new string(ascii)));
             }
+
             HexGrid.ItemsSource = rows;
+
+            StatusText.Text = rowCount < totalRows
+                ? $"Showing 0x{baseAddr + (uint)start:X8}..0x{baseAddr + (uint)(start + rowCount * 16 - 1):X8} " +
+                  $"(at most {MaxViewRows * 16} bytes are shown - enter an address to go further)"
+                : $"View offset: 0x{start:X}";
         }
 
-        private byte[] ParseIntelHex(string[] lines)
-        {
-            byte[] tempBuffer = new byte[1024 * 1024];
-            int maxAddress = 0;
+        // ==================== Open file ====================
 
-            foreach (string line in lines)
-            {
-                if (!line.StartsWith(":") || line.Length < 11) continue;
-
-                int byteCount = Convert.ToInt32(line.Substring(1, 2), 16);
-                int address = Convert.ToInt32(line.Substring(3, 4), 16);
-                int recordType = Convert.ToInt32(line.Substring(7, 2), 16);
-
-                if (recordType == 00)
-                {
-                    for (int i = 0; i < byteCount; i++)
-                    {
-                        byte b = (byte)Convert.ToInt32(line.Substring(9 + (i * 2), 2), 16);
-                        tempBuffer[address + i] = b;
-                        if (address + i > maxAddress) maxAddress = address + i;
-                    }
-                }
-                else if (recordType == 01) break;
-            }
-
-            byte[] result = new byte[maxAddress + 1];
-            Array.Copy(tempBuffer, result, maxAddress + 1);
-            return result;
-        }
-
-        private byte[] ParseMotorolaSRecord(string[] lines)
-        {
-            // Определим минимальный и максимальный адреса
-            uint minAddr = uint.MaxValue;
-            uint maxAddr = 0;
-            // Сначала проходим по строкам, чтобы найти границы адресов
-            foreach (string line in lines)
-            {
-                if (string.IsNullOrEmpty(line) || line[0] != 'S') continue;
-                if (line.Length < 4) continue;
-
-                char recordType = line[1];
-                // Интересуют только типы с данными: S1, S2, S3
-                if (recordType != '1' && recordType != '2' && recordType != '3') continue;
-
-                // Длина записи (байт данных + адрес + контрольная сумма) в байтах
-                int byteCount = Convert.ToInt32(line.Substring(2, 2), 16);
-                if (line.Length < 4 + byteCount * 2) continue; // недостаточно символов
-
-                int addrBytes = 0;
-                if (recordType == '1') addrBytes = 2; // 16-битный адрес
-                else if (recordType == '2') addrBytes = 3; // 24-битный
-                else if (recordType == '3') addrBytes = 4; // 32-битный
-
-                // Извлекаем адрес
-                uint address = 0;
-                for (int i = 0; i < addrBytes; i++)
-                {
-                    byte b = (byte)Convert.ToInt32(line.Substring(4 + i * 2, 2), 16);
-                    address = (address << 8) | b;
-                }
-
-                // Данные (байты после адреса, до последнего байта перед контрольной суммой)
-                int dataBytes = byteCount - addrBytes - 1; // минус контрольная сумма
-                if (dataBytes < 0) continue;
-
-                // Обновляем границы
-                if (address < minAddr) minAddr = address;
-                uint endAddr = address + (uint)dataBytes - 1;
-                if (endAddr > maxAddr) maxAddr = endAddr;
-            }
-
-            if (minAddr == uint.MaxValue)
-                throw new Exception("No valid S-record data found");
-
-            // Создаём буфер, заполняем 0xFF (стёртое состояние)
-            uint bufferSize = maxAddr - minAddr + 1;
-            byte[] buffer = new byte[bufferSize];
-            for (int i = 0; i < bufferSize; i++) buffer[i] = 0xFF;
-
-            // Второй проход: записываем данные
-            foreach (string line in lines)
-            {
-                if (string.IsNullOrEmpty(line) || line[0] != 'S') continue;
-                if (line.Length < 4) continue;
-
-                char recordType = line[1];
-                if (recordType != '1' && recordType != '2' && recordType != '3') continue;
-
-                int byteCount = Convert.ToInt32(line.Substring(2, 2), 16);
-                if (line.Length < 4 + byteCount * 2) continue;
-
-                int addrBytes = (recordType == '1') ? 2 : (recordType == '2') ? 3 : 4;
-
-                uint address = 0;
-                for (int i = 0; i < addrBytes; i++)
-                {
-                    byte b = (byte)Convert.ToInt32(line.Substring(4 + i * 2, 2), 16);
-                    address = (address << 8) | b;
-                }
-
-                int dataBytes = byteCount - addrBytes - 1;
-                if (dataBytes <= 0) continue;
-
-                // Вычисляем контрольную сумму (опционально)
-                byte checksum = 0;
-                for (int i = 0; i < byteCount - 1; i++) // суммируем все байты кроме контрольной суммы
-                {
-                    string byteStr = line.Substring(2 + i * 2, 2);
-                    checksum += (byte)Convert.ToInt32(byteStr, 16);
-                }
-                byte expectedChecksum = (byte)Convert.ToInt32(line.Substring(2 + (byteCount - 1) * 2, 2), 16);
-                if ((checksum + expectedChecksum) != 0xFF)
-                {
-                    // Можно проигнорировать или выбросить исключение
-                    // Для надёжности проигнорируем
-                }
-
-                // Копируем данные в буфер со смещением
-                uint offset = address - minAddr;
-                for (int i = 0; i < dataBytes; i++)
-                {
-                    byte b = (byte)Convert.ToInt32(line.Substring(4 + addrBytes * 2 + i * 2, 2), 16);
-                    buffer[offset + i] = b;
-                }
-            }
-
-            return buffer;
-        }
-
-        private byte[] ParseTiTxt(string[] lines)
-        {
-            // Сначала соберём все пары (адрес, байт) в список
-            var dataList = new List<(uint addr, byte value)>();
-            uint currentAddr = 0;
-            bool inData = false;
-            uint minAddr = uint.MaxValue;
-            uint maxAddr = 0;
-
-            foreach (string rawLine in lines)
-            {
-                string line = rawLine.Trim();
-                if (string.IsNullOrEmpty(line)) continue;
-
-                // Проверка на конец файла 'q'
-                if (line == "q" || line == "Q")
-                    break;
-
-                if (line[0] == '@')
-                {
-                    // Строка с адресом
-                    string addrStr = line.Substring(1).Trim();
-                    if (!uint.TryParse(addrStr, System.Globalization.NumberStyles.HexNumber, null, out currentAddr))
-                        throw new Exception($"Invalid address: {addrStr}");
-                    inData = true;
-                    continue;
-                }
-
-                if (!inData) continue; // пропускаем строки до первого адреса
-
-                // Разбиваем строку на части по пробелам
-                string[] parts = line.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (string part in parts)
-                {
-                    if (part.Length == 0) continue;
-                    // Иногда встречается 'q' в середине строки? По стандарту нет, но на всякий случай
-                    if (part == "q" || part == "Q")
-                        break;
-
-                    byte b = Convert.ToByte(part, 16);
-                    dataList.Add((currentAddr, b));
-                    if (currentAddr < minAddr) minAddr = currentAddr;
-                    if (currentAddr > maxAddr) maxAddr = currentAddr;
-                    currentAddr++;
-                }
-            }
-
-            if (dataList.Count == 0)
-                throw new Exception("No valid TI-TXT data found");
-
-            // Создаём массив от minAddr до maxAddr
-            uint size = maxAddr - minAddr + 1;
-            byte[] buffer = new byte[size];
-            // Заполняем 0xFF (стёртое состояние) – опционально, если нужно
-            for (int i = 0; i < size; i++) buffer[i] = 0xFF;
-
-            foreach (var (addr, value) in dataList)
-            {
-                uint offset = addr - minAddr;
-                buffer[offset] = value;
-            }
-
-            return buffer;
-        }
-
-        // ==== Обработчики меню ====
         private void Open_Click(object sender, RoutedEventArgs e)
         {
-            var dialog = new OpenFileDialog();
-            dialog.Filter = "All Supported|*.bin;*.hex;*.s19;*.mot;*.srec;*.txt;*.ti-txt|Binary files (*.bin)|*.bin|Intel HEX (*.hex)|*.hex|Motorola S-record (*.s19;*.mot;*.srec)|*.s19;*.mot;*.srec|TI-TXT (*.txt;*.ti-txt)|*.txt;*.ti-txt";
-
-            if (dialog.ShowDialog() == true)
+            var dialog = new OpenFileDialog
             {
-                try
+                Filter = "All Supported|*.bin;*.hex;*.ihx;*.s19;*.s28;*.s37;*.mot;*.srec;*.txt;*.ti-txt" +
+                         "|Binary files (*.bin)|*.bin" +
+                         "|Intel HEX (*.hex;*.ihx)|*.hex;*.ihx" +
+                         "|Motorola S-record (*.s19;*.s28;*.s37;*.mot;*.srec)|*.s19;*.s28;*.s37;*.mot;*.srec" +
+                         "|TI-TXT (*.txt;*.ti-txt)|*.txt;*.ti-txt" +
+                         "|All files (*.*)|*.*"
+            };
+
+            if (dialog.ShowDialog() != true) return;
+
+            try
+            {
+                string path = dialog.FileName;
+
+                // Detect the format by extension, or by the file head if ambiguous.
+                // Text formats are read line by line, binary directly as bytes (no double read).
+                byte[] head = ReadHead(path, 512);
+                var format = HexFile.DetectFormat(path, head);
+
+                FirmwareImage image;
+                if (format == HexFile.FileFormat.Binary)
                 {
-                    string ext = Path.GetExtension(dialog.FileName).ToLower();
-                    // Читаем файл один раз в любом случае
-                    string[] lines = File.ReadAllLines(dialog.FileName);
-                    bool parsed = false;
-
-                    if (ext == ".hex")
-                    {
-                        _currentFileData = ParseIntelHex(lines);
-                        parsed = true;
-                    }
-                    else if (ext == ".s19" || ext == ".mot" || ext == ".srec")
-                    {
-                        _currentFileData = ParseMotorolaSRecord(lines);
-                        parsed = true;
-                    }
-                    else if (ext == ".txt" || ext == ".ti-txt")
-                    {
-                        // Проверяем, похоже ли на TI-TXT (первая строка начинается с '@')
-                        if (lines.Length > 0 && lines[0].TrimStart().StartsWith("@"))
-                        {
-                            _currentFileData = ParseTiTxt(lines);
-                            parsed = true;
-                        }
-                    }
-
-                    if (!parsed)
-                    {
-                        // Если ни один парсер не сработал, читаем как бинарный
-                        // Но мы уже прочитали файл как текст, поэтому нужно перечитать как бинарный
-                        _currentFileData = File.ReadAllBytes(dialog.FileName);
-                    }
-
-                    _startOffset = 0;
-                    FileNameText.Text = Path.GetFileName(dialog.FileName);
-                    Log($"File: {dialog.FileName}\nType: {(parsed ? "Parsed" : "Binary")}\nSize: {_currentFileData!.Length} bytes");
-                    RefreshHexView();
+                    // A raw binary has no address - it is placed at the application address
+                    image = new FirmwareImage(File.ReadAllBytes(path), SettingsWindow.GetAppAddress(), hasAddress: false);
                 }
-                catch (Exception ex)
+                else
                 {
-                    MessageBox.Show("Error: " + ex.Message);
+                    string[] lines = File.ReadAllLines(path);
+                    image = format switch
+                    {
+                        HexFile.FileFormat.IntelHex => HexFile.ParseIntelHex(lines),
+                        HexFile.FileFormat.SRecord => HexFile.ParseSRecord(lines),
+                        _ => HexFile.ParseTiTxt(lines),
+                    };
                 }
+
+                _image = image;
+                _viewOffset = 0;
+                _lastFileName = Path.GetFileNameWithoutExtension(path);
+                AddressInput.Text = "0x0";
+
+                FileNameText.Text = Path.GetFileName(path);
+                FileInfoTextBlock.Text =
+                    $"{format}, {image.Data.Length} bytes, 0x{image.BaseAddress:X8}..0x{image.EndAddress:X8}" +
+                    (image.HasAddress ? "" : " (assumed)");
+
+                Log($"Opened: {path}");
+                Log($"  format: {format}, size: {image.Data.Length} bytes, " +
+                    $"address 0x{image.BaseAddress:X8}..0x{image.EndAddress:X8}" +
+                    (image.HasAddress ? "" : " (binary file, application address assumed)"));
+
+                foreach (string w in image.Warnings)
+                    Log("  warning: " + w);
+
+                RefreshHexView();
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to open file: {ex.Message}");
+                MessageBox.Show(ex.Message, "Open file", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private static byte[] ReadHead(string path, int count)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var buffer = new byte[(int)Math.Min(count, fs.Length)];
+            int read = 0;
+            while (read < buffer.Length)
+            {
+                int n = fs.Read(buffer, read, buffer.Length - read);
+                if (n <= 0) break;
+                read += n;
+            }
+            return read == buffer.Length ? buffer : buffer.AsSpan(0, read).ToArray();
+        }
+
+        // ==================== Save ====================
+
+        private void SaveWith(string filter, string defaultExt, Func<FirmwareImage, string, string> generator)
+        {
+            if (_image == null) { Log("No data to save."); return; }
+
+            var dialog = new SaveFileDialog
+            {
+                Filter = filter,
+                DefaultExt = defaultExt,
+                FileName = _lastFileName + "." + defaultExt
+            };
+            if (dialog.ShowDialog() != true) return;
+
+            try
+            {
+                string content = generator(_image, dialog.FileName);
+                File.WriteAllText(dialog.FileName, content, Encoding.ASCII);
+                Log($"Saved: {dialog.FileName}");
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to save file: {ex.Message}");
+                MessageBox.Show(ex.Message, "Save file", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
         private void SaveAsBinary_Click(object sender, RoutedEventArgs e)
         {
-            if (_currentFileData == null) { Log("No data to save."); return; }
-            var dialog = new SaveFileDialog { Filter = "Binary files (*.bin)|*.bin", DefaultExt = "bin" };
-            if (dialog.ShowDialog() == true)
+            if (_image == null) { Log("No data to save."); return; }
+
+            var dialog = new SaveFileDialog
             {
-                try
-                {
-                    File.WriteAllBytes(dialog.FileName, _currentFileData);
-                    Log($"Saved as binary: {dialog.FileName}");
-                }
-                catch (Exception ex) { Log($"Save error: {ex.Message}"); }
+                Filter = "Binary files (*.bin)|*.bin",
+                DefaultExt = "bin",
+                FileName = _lastFileName + ".bin"
+            };
+            if (dialog.ShowDialog() != true) return;
+
+            try
+            {
+                File.WriteAllBytes(dialog.FileName, _image.Data);
+                Log($"Saved (bin): {dialog.FileName}");
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to save file: {ex.Message}");
+                MessageBox.Show(ex.Message, "Save file", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
-        private void SaveAsHex_Click(object sender, RoutedEventArgs e)
-        {
-            if (_currentFileData == null) { Log("No data to save."); return; }
-            var dialog = new SaveFileDialog { Filter = "Intel HEX files (*.hex)|*.hex", DefaultExt = "hex" };
-            if (dialog.ShowDialog() == true)
-            {
-                try
-                {
-                    string hex = GenerateIntelHex(_currentFileData);
-                    File.WriteAllText(dialog.FileName, hex, Encoding.ASCII);
-                    Log($"Saved as Intel HEX: {dialog.FileName}");
-                }
-                catch (Exception ex) { Log($"Save error: {ex.Message}"); }
-            }
-        }
+        private void SaveAsHex_Click(object sender, RoutedEventArgs e) =>
+            SaveWith("Intel HEX files (*.hex)|*.hex", "hex",
+                     (img, _) => HexFile.GenerateIntelHex(img.Data, img.BaseAddress));
 
-        private void SaveAsSrec_Click(object sender, RoutedEventArgs e)
-        {
-            if (_currentFileData == null) { Log("No data to save."); return; }
-            var dialog = new SaveFileDialog { Filter = "Motorola S-record (*.s19;*.srec)|*.s19;*.srec", DefaultExt = "s19" };
-            if (dialog.ShowDialog() == true)
-            {
-                try
-                {
-                    string srec = GenerateMotorolaSRecord(_currentFileData);
-                    File.WriteAllText(dialog.FileName, srec, Encoding.ASCII);
-                    Log($"Saved as S-record: {dialog.FileName}");
-                }
-                catch (Exception ex) { Log($"Save error: {ex.Message}"); }
-            }
-        }
+        private void SaveAsSrec_Click(object sender, RoutedEventArgs e) =>
+            SaveWith("Motorola S-record (*.s19;*.srec)|*.s19;*.srec", "s19",
+                     (img, _) => HexFile.GenerateSRecord(img.Data, img.BaseAddress));
 
-        private void SaveAsTiTxt_Click(object sender, RoutedEventArgs e)
-        {
-            if (_currentFileData == null) { Log("No data to save."); return; }
-            var dialog = new SaveFileDialog { Filter = "TI-TXT files (*.txt)|*.txt", DefaultExt = "txt" };
-            if (dialog.ShowDialog() == true)
-            {
-                try
-                {
-                    string titxt = GenerateTiTxt(_currentFileData);
-                    File.WriteAllText(dialog.FileName, titxt, Encoding.ASCII);
-                    Log($"Saved as TI-TXT: {dialog.FileName}");
-                }
-                catch (Exception ex) { Log($"Save error: {ex.Message}"); }
-            }
-        }
+        private void SaveAsTiTxt_Click(object sender, RoutedEventArgs e) =>
+            SaveWith("TI-TXT files (*.txt)|*.txt", "txt",
+                     (img, _) => HexFile.GenerateTiTxt(img.Data, img.BaseAddress));
 
-        // ==== Генерация Intel HEX ====
-        private string GenerateIntelHex(byte[] data)
-        {
-            const int bytesPerLine = 16;
-            var sb = new StringBuilder();
-            int address = 0;
-            while (address < data.Length)
-            {
-                int chunk = Math.Min(bytesPerLine, data.Length - address);
-                int checksum = chunk; // длина
-                checksum += (address >> 8) & 0xFF; // старший байт адреса
-                checksum += address & 0xFF;         // младший байт адреса
-                checksum += 0; // тип записи 00
+        private void SaveAsCArray_Click(object sender, RoutedEventArgs e) =>
+            SaveWith("C source files (*.c;*.h)|*.c;*.h", "h",
+                     (img, path) => HexFile.GenerateCArray(img.Data, img.BaseAddress,
+                                                           Path.GetFileNameWithoutExtension(path)));
 
-                sb.Append(':');
-                sb.Append(chunk.ToString("X2"));
-                sb.Append((address >> 8).ToString("X2"));
-                sb.Append((address & 0xFF).ToString("X2"));
-                sb.Append("00"); // тип
-
-                for (int i = 0; i < chunk; i++)
-                {
-                    byte b = data[address + i];
-                    sb.Append(b.ToString("X2"));
-                    checksum += b;
-                }
-
-                checksum = (-checksum) & 0xFF;
-                sb.AppendLine(checksum.ToString("X2"));
-
-                address += chunk;
-            }
-            // Конец файла
-            sb.AppendLine(":00000001FF");
-            return sb.ToString();
-        }
-
-        // ==== Генерация Motorola S-record (S3, 32-битный адрес) ====
-        private string GenerateMotorolaSRecord(byte[] data)
-        {
-            const int bytesPerLine = 16; // макс 16 байт данных в S3 (тип 3)
-            var sb = new StringBuilder();
-            int address = 0;
-            while (address < data.Length)
-            {
-                int dataBytes = Math.Min(bytesPerLine, data.Length - address);
-                int totalBytes = dataBytes + 5; // адрес 4 байта + контрольная сумма 1 байт
-                if (totalBytes > 0xFF) totalBytes = 0xFF; // ограничение длины, но у нас не превысит
-
-                sb.Append('S');
-                sb.Append('3'); // тип S3
-                sb.Append(totalBytes.ToString("X2"));
-
-                // адрес 32 бита
-                sb.Append(((address >> 24) & 0xFF).ToString("X2"));
-                sb.Append(((address >> 16) & 0xFF).ToString("X2"));
-                sb.Append(((address >> 8) & 0xFF).ToString("X2"));
-                sb.Append((address & 0xFF).ToString("X2"));
-
-                byte checksum = (byte)(totalBytes +
-                                       ((address >> 24) & 0xFF) +
-                                       ((address >> 16) & 0xFF) +
-                                       ((address >> 8) & 0xFF) +
-                                       (address & 0xFF));
-
-                for (int i = 0; i < dataBytes; i++)
-                {
-                    byte b = data[address + i];
-                    sb.Append(b.ToString("X2"));
-                    checksum += b;
-                }
-
-                checksum = (byte)(~checksum); // контрольная сумма = 0xFF - сумма всех байтов (кроме префикса S и типа)
-                sb.AppendLine(checksum.ToString("X2"));
-
-                address += dataBytes;
-            }
-            // Завершающая запись S9 (адрес 0)
-            sb.AppendLine("S9030000FC");
-            return sb.ToString();
-        }
-
-        // ==== Генерация TI-TXT ====
-        private string GenerateTiTxt(byte[] data)
-        {
-            const int bytesPerLine = 16;
-            var sb = new StringBuilder();
-            sb.AppendLine("@0"); // начинаем с адреса 0
-            int address = 0;
-            while (address < data.Length)
-            {
-                int chunk = Math.Min(bytesPerLine, data.Length - address);
-                for (int i = 0; i < chunk; i++)
-                {
-                    sb.Append(data[address + i].ToString("X2"));
-                    if (i < chunk - 1) sb.Append(' ');
-                }
-                sb.AppendLine();
-                address += chunk;
-            }
-            sb.AppendLine("q");
-            return sb.ToString();
-        }
+        // ==================== View ====================
 
         private void Mode_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is Button btn && int.TryParse(btn.Tag?.ToString(), out int mode))
+            if (sender is Button btn && int.TryParse(btn.Tag?.ToString(), out int mode) &&
+                (mode == 1 || mode == 2 || mode == 4))
             {
                 _currentMode = mode;
                 RefreshHexView();
@@ -561,348 +390,356 @@ namespace HexLoad
 
         private void AddressInput_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
-            if (e.Key == System.Windows.Input.Key.Enter)
+            if (e.Key != System.Windows.Input.Key.Enter) return;
+            if (_image == null) return;
+
+            if (!SettingsWindow.TryParseAddress(AddressInput.Text, out uint value))
             {
-                if (_currentFileData == null) return;
-
-                try
-                {
-                    string input = AddressInput.Text.Trim();
-                    if (input.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                        _startOffset = Convert.ToInt32(input.Substring(2), 16);
-                    else
-                        _startOffset = Convert.ToInt32(input, 16);
-
-                    if (_startOffset >= _currentFileData.Length) _startOffset = _currentFileData.Length - 1;
-                    if (_startOffset < 0) _startOffset = 0;
-
-                    RefreshHexView();
-                    StatusText.Text = $"Started view from offset: 0x{_startOffset:X4}";
-                }
-                catch
-                {
-                    MessageBox.Show("Invalid address! Use HEX format (e.g. 0x100 or 100)");
-                }
+                MessageBox.Show("Invalid address. Use hex, e.g. 0x100 or 100.",
+                                "Address", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
             }
+
+            // Accept both an absolute address and an offset from the start of the image
+            uint offset = value >= _image.BaseAddress ? value - _image.BaseAddress : value;
+            if (offset >= (uint)_image.Data.Length) offset = (uint)Math.Max(0, _image.Data.Length - 1);
+
+            _viewOffset = (int)offset;
+            RefreshHexView();
         }
+
+        // ==================== Settings / About ====================
 
         private void Options_Click(object sender, RoutedEventArgs e)
         {
-            var settingsWindow = new SettingsWindow();
-            settingsWindow.Owner = this;
+            var settingsWindow = new SettingsWindow { Owner = this };
             if (settingsWindow.ShowDialog() == true)
-            {
                 UpdatePortDisplay();
-            }
         }
 
         private void About_Click(object sender, RoutedEventArgs e)
         {
-            var about = new AboutWindow();
-            about.Owner = this;
+            var about = new AboutWindow { Owner = this };
             about.ShowDialog();
         }
 
-        private void Exit_Click(object sender, RoutedEventArgs e) => Application.Current.Shutdown();
+        private void Exit_Click(object sender, RoutedEventArgs e) => Close();
 
-        // ==== Подключение с повторными попытками и корректным управлением ресурсами ====
+        // ==================== Connect ====================
+
         private async void ConnectButton_Click(object sender, RoutedEventArgs e)
         {
-            // Если уже подключены — отключаемся
+            // Connected -> disconnect
             if (_bootloader != null)
             {
                 _bootloader.Dispose();
                 _bootloader = null;
-                TargetStatus.Text = "Not connected";
-                TargetStatus.Foreground = Brushes.Red;
+                ClearTargetInfo();
                 Log("Disconnected.");
                 return;
             }
 
-            // Если идёт процесс подключения — отменяем
+            // Connection attempt in progress -> cancel it
             if (_connectCts != null)
             {
                 _connectCts.Cancel();
-                _connectCts = null;
-                Log("Connection attempt cancelled.");
+                Log("Cancelling connection...");
                 return;
             }
 
-            // Начинаем новое подключение
             string port = Settings.Default.ComPort;
             int baud = Settings.Default.BaudRate;
 
-            if (string.IsNullOrEmpty(port))
+            if (string.IsNullOrWhiteSpace(port))
             {
-                Log("COM port not configured. Go to Options.");
+                Log("COM port is not set. Open Options...");
+                MessageBox.Show("COM port is not set. Open Options...", "Connect",
+                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (baud <= 0)
+            {
+                Log("Invalid baud rate. Open Options...");
+                MessageBox.Show("Invalid baud rate. Open Options...", "Connect",
+                                MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            _connectCts = new CancellationTokenSource();
-            var token = _connectCts.Token;
+            var cts = new CancellationTokenSource();
+            _connectCts = cts;
+            var token = cts.Token;
+
+            MenuConnect.Header = "Cancel connect";
+            SetBusy(true);
 
             try
             {
-                int attempt = 1;
+                Log($"Connecting to {port} @ {baud}... (retrying until cancelled; reset the board to enter the bootloader)");
+                int attempt = 0;
+                string? lastError = null;
+
                 while (!token.IsCancellationRequested)
                 {
-                    Log($"Connection attempt {attempt} to {port} at {baud}...");
-                    var boot = new Bootloader(port, baud);
+                    attempt++;
+                    Bootloader? boot = null;
                     try
                     {
-                        bool connected = await boot.ConnectAsync();
-                        if (connected)
+                        boot = new Bootloader(port, baud);
+                        if (await boot.ConnectAsync(token).ConfigureAwait(true))
                         {
-                            var info = await boot.GetInfoAsync(token);
-                            _bootloader = boot; // сохраняем успешное подключение
+                            var info = await boot.GetInfoAsync(token).ConfigureAwait(true);
+                            _bootloader = boot;
+                            boot = null;                    // ownership moved to the field
                             UpdateTargetInfo(info);
-                            Log("Connected successfully.");
+                            Log($"Connected (attempt {attempt}).");
                             return;
                         }
-                        else
-                        {
-                            boot.Dispose(); // неудачная попытка – освобождаем
-                        }
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        boot.Dispose();
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        boot.Dispose();
-                        Log($"Attempt {attempt} failed: {ex.Message}");
-                    }
-
-                    attempt++;
-                    try
-                    {
-                        await Task.Delay(1000, token);
                     }
                     catch (OperationCanceledException)
                     {
                         break;
                     }
+                    catch (Exception ex)
+                    {
+                        // Do not repeat the same error in the log on every attempt
+                        if (ex.Message != lastError)
+                        {
+                            lastError = ex.Message;
+                            Log($"  attempt {attempt}: {ex.Message}");
+                        }
+                    }
+                    finally
+                    {
+                        boot?.Dispose();
+                    }
+
+                    try { await Task.Delay(500, token).ConfigureAwait(true); }
+                    catch (OperationCanceledException) { break; }
                 }
-            }
-            catch (OperationCanceledException)
-            {
+
                 Log("Connection cancelled.");
             }
             finally
             {
-                _connectCts?.Dispose();
                 _connectCts = null;
+                cts.Dispose();
+                MenuConnect.Header = _bootloader != null ? "Disconnect" : "Connect";
+                SetBusy(false);
             }
         }
 
         private void UpdateTargetInfo(BootInfo info)
         {
-            uint v = info.Version;
-            string versionStr = $"{(v >> 24) & 0xFF}.{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}.{v & 0xFF}";
-            TargetStatus.Text = $"Connected: v{versionStr}, Product 0x{info.Product:X8}, Pages {info.Pages + 2}, PageSize {info.PageSize}";
+            TargetStatus.Text = "Connected";
             TargetStatus.Foreground = Brushes.Blue;
+
+            TargetVersion.Text = $"Version:   {info.VersionString}";
+            TargetProduct.Text = $"Product:   0x{info.Product:X8}";
+            TargetPages.Text = $"Pages:     {info.Pages} (application area)";
+            TargetPageSize.Text = $"Page size: {info.PageSize} B, app flash {info.FlashSize / 1024} KB";
+
+            TargetVersion.Visibility = Visibility.Visible;
+            TargetProduct.Visibility = Visibility.Visible;
+            TargetPages.Visibility = Visibility.Visible;
+            TargetPageSize.Visibility = Visibility.Visible;
+
+            Log($"Device: bootloader v{info.VersionString}, product 0x{info.Product:X8}, " +
+                $"{info.Pages} pages x {info.PageSize} B = {info.FlashSize} B for the application");
         }
+
+        private void ClearTargetInfo()
+        {
+            TargetStatus.Text = "Not connected";
+            TargetStatus.Foreground = Brushes.Red;
+            TargetVersion.Visibility = Visibility.Collapsed;
+            TargetProduct.Visibility = Visibility.Collapsed;
+            TargetPages.Visibility = Visibility.Collapsed;
+            TargetPageSize.Visibility = Visibility.Collapsed;
+            MenuConnect.Header = "Connect";
+        }
+
+        // ==================== Erase / reset ====================
 
         private async void Erase_Click(object sender, RoutedEventArgs e)
         {
-            if (_bootloader == null)
-            {
-                Log("Not connected.");
-                return;
-            }
+            if (_busy || !RequireConnection()) return;
 
             var result = MessageBox.Show(
-                "Are you sure you want to erase the entire application flash?",
-                "Confirm Erase",
+                "Erase the whole application area of the flash?",
+                "Confirm erase",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning);
 
-            if (result != MessageBoxResult.Yes)
-                return;
+            if (result != MessageBoxResult.Yes) return;
 
+            SetBusy(true);
             try
             {
                 Log("Erasing flash...");
-                await _bootloader.EraseAsync();
-                Log("Flash erased successfully.");
+                await _bootloader!.EraseAsync().ConfigureAwait(true);
+                Log("Flash erased.");
             }
             catch (Exception ex)
             {
                 Log($"Erase failed: {ex.Message}");
-                MessageBox.Show($"Error: {ex.Message}", "Erase Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(ex.Message, "Erase", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                SetBusy(false);
             }
         }
 
         private async void Reset_Click(object sender, RoutedEventArgs e)
         {
-            if (_bootloader == null)
-            {
-                Log("Not connected.");
-                return;
-            }
+            if (_busy || !RequireConnection()) return;
 
+            SetBusy(true);
             try
             {
-                Log("Resetting target...");
-                await _bootloader.ResetAsync();
+                Log("Resetting device...");
+                await _bootloader!.ResetAsync().ConfigureAwait(true);
                 Log("Reset command sent.");
-
-                // После сброса соединение обычно теряется, освобождаем ресурсы
-                _bootloader.Dispose();
-                _bootloader = null;
-                TargetStatus.Text = "Not connected";
-                TargetStatus.Foreground = Brushes.Red;
-
-                // Скрываем детальную информацию (если она была)
-                TargetVersion.Visibility = Visibility.Collapsed;
-                TargetProduct.Visibility = Visibility.Collapsed;
-                TargetPages.Visibility = Visibility.Collapsed;
-                TargetPageSize.Visibility = Visibility.Collapsed;
             }
             catch (Exception ex)
             {
                 Log($"Reset failed: {ex.Message}");
             }
+            finally
+            {
+                // The device restarts - release the port
+                _bootloader?.Dispose();
+                _bootloader = null;
+                ClearTargetInfo();
+                SetBusy(false);
+            }
         }
 
-        // ==== Прошивка ====
+        // ==================== Program ====================
+
+        /// <summary>
+        /// The bootloader writes page N at APPLICATION_ADDRESS + offset, so the image must start
+        /// at the application address. Checks images that carry addresses (HEX/S-record/TI-TXT).
+        /// Returns the image to program, or null if the user cancelled.
+        /// </summary>
+        private FirmwareImage? CheckLoadAddress(FirmwareImage image)
+        {
+            if (!image.HasAddress) return image;
+
+            uint app = SettingsWindow.GetAppAddress();
+            if (image.BaseAddress == app) return image;
+
+            if (image.BaseAddress < app && image.EndAddress >= app)
+            {
+                uint skipped = app - image.BaseAddress;
+                var answer = MessageBox.Show(
+                    $"The image starts at 0x{image.BaseAddress:X8}, below the application address 0x{app:X8}.\n" +
+                    $"The first {skipped} bytes belong to the bootloader area and cannot be written.\n\n" +
+                    $"Program only the part starting at 0x{app:X8}?",
+                    "Load address", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+                if (answer != MessageBoxResult.Yes) return null;
+                Log($"Skipping {skipped} bytes below 0x{app:X8}.");
+                return image.SliceFrom(app);
+            }
+
+            var answer2 = MessageBox.Show(
+                $"The image is linked for 0x{image.BaseAddress:X8}, but the bootloader places the " +
+                $"application at 0x{app:X8}.\nThe firmware will most likely not run.\n\nProgram anyway?",
+                "Load address", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+            return answer2 == MessageBoxResult.Yes ? image : null;
+        }
+
         private async void ProgramButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_bootloader == null)
+            if (_busy || !RequireConnection()) return;
+
+            if (_image == null || _image.Data.Length == 0)
             {
-                Log("Not connected.");
+                Log("No firmware loaded - open a file first.");
                 return;
             }
 
-            if (_currentFileData == null)
+            var boot = _bootloader!;
+            if (!boot.HasDeviceInfo)
             {
-                Log("No firmware loaded. Open a file first.");
+                Log("No device info - reconnect.");
                 return;
             }
 
-            // Проверка соединения (обновляем таймаут загрузчика)
-            try
+            var image = CheckLoadAddress(_image);
+            if (image == null)
             {
-                Log("Checking connection...");
-                bool connected = await _bootloader.ConnectAsync();
-                if (!connected)
-                {
-                    Log("Connection lost. Please reconnect.");
-                    return;
-                }
-            }
-            catch (Exception ex)
-            {
-                Log($"Connection check failed: {ex.Message}. Please reconnect.");
+                Log("Programming cancelled (load address).");
                 return;
             }
 
-            byte[] firmware = _currentFileData.Skip(_startOffset).ToArray();
-            uint flashSize = _bootloader.DeviceInfo.Pages * _bootloader.DeviceInfo.PageSize;
-            if (firmware.Length > flashSize)
+            byte[] firmware = image.Data;
+            uint flashSize = boot.DeviceInfo.FlashSize;
+            if ((uint)firmware.Length > flashSize)
             {
-                Log($"Firmware size ({firmware.Length} bytes) exceeds flash ({flashSize} bytes).");
+                string msg = $"Firmware size ({firmware.Length} B) exceeds the application area ({flashSize} B).";
+                Log(msg);
+                MessageBox.Show(msg, "Program", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
-            _programCts = new CancellationTokenSource();
-            var progressWindow = new ProgressWindow();
-            progressWindow.Owner = this;
-            progressWindow.CancelRequested += (s, args) => _programCts?.Cancel();
+            SetBusy(true);
+            using var cts = new CancellationTokenSource();
+            var progressWindow = new ProgressWindow { Owner = this };
+            progressWindow.CancelRequested += (_, _) => cts.Cancel();
 
-            var programTask = ProgramFirmwareAsync(progressWindow, firmware, _programCts.Token);
+            Task? work = null;
+
+            // Start the task only after the window is shown: otherwise a fast run could close
+            // the window before ShowDialog() is called, leaving the dialog open forever.
+            progressWindow.Loaded += (_, _) => work = RunProgrammingAsync(boot, firmware, progressWindow, cts.Token);
             progressWindow.ShowDialog();
 
             try
             {
-                await programTask;
-                Log("Programming completed successfully.");
+                if (work != null) await work.ConfigureAwait(true);
+                Log($"Programming completed: {firmware.Length} bytes.");
 
-                // После сброса соединение обычно теряется, освобождаем ресурсы
-                _bootloader.Dispose();
+                // The device restarts after CMD_RESET - release the port
+                _bootloader?.Dispose();
                 _bootloader = null;
-                TargetStatus.Text = "Not connected";
-                TargetStatus.Foreground = Brushes.Red;
-
-                // Скрываем детальную информацию (если она была)
-                TargetVersion.Visibility = Visibility.Collapsed;
-                TargetProduct.Visibility = Visibility.Collapsed;
-                TargetPages.Visibility = Visibility.Collapsed;
-                TargetPageSize.Visibility = Visibility.Collapsed;
+                ClearTargetInfo();
             }
             catch (OperationCanceledException)
             {
-                Log("Programming cancelled.");
+                Log("Programming cancelled. Flash content is undefined - program again.");
             }
             catch (Exception ex)
             {
                 Log($"Programming failed: {ex.Message}");
-                MessageBox.Show($"Error: {ex.Message}", "Programming Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(ex.Message, "Program", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
             {
-                _programCts?.Dispose();
-                _programCts = null;
+                SetBusy(false);
             }
         }
 
-        private async Task ProgramFirmwareAsync(ProgressWindow progressWindow, byte[] firmware, CancellationToken token)
+        private async Task RunProgrammingAsync(Bootloader boot, byte[] firmware,
+                                               ProgressWindow window, CancellationToken token)
         {
             try
             {
-                await _bootloader!.EraseAsync(token);
-                var progress = new Progress<int>(value =>
-                {
-                    progressWindow.UpdateProgress(value, $"Programming... {value}%");
-                });
-                await _bootloader.ProgramAsync(firmware, progress, token);
-                await _bootloader.ResetAsync(token);
-                progressWindow.Dispatcher.Invoke(() => progressWindow.Close());
-            }
-            catch
-            {
-                progressWindow.Dispatcher.Invoke(() => progressWindow.Close());
-                throw;
-            }
-        }
+                window.UpdateProgress(0, "Erasing flash...");
+                await boot.EraseAsync(token).ConfigureAwait(true);
 
-        private void SaveAsCArray_Click(object sender, RoutedEventArgs e)
-        {
-            if (_currentFileData == null) { Log("No data to save."); return; }
-            var dialog = new SaveFileDialog { Filter = "C source files (*.c;*.h)|*.c;*.h", DefaultExt = "h" };
-            if (dialog.ShowDialog() == true)
-            {
-                try
-                {
-                    string arrayName = Path.GetFileNameWithoutExtension(dialog.FileName) ?? "firmware";
-                    string content = GenerateCArray(_currentFileData, arrayName);
-                    File.WriteAllText(dialog.FileName, content, Encoding.ASCII);
-                    Log($"Saved as C array: {dialog.FileName}");
-                }
-                catch (Exception ex) { Log($"Save error: {ex.Message}"); }
-            }
-        }
+                var progress = new Progress<int>(value => window.UpdateProgress(value, $"Writing... {value}%"));
+                await boot.ProgramAsync(firmware, progress, token).ConfigureAwait(true);
 
-        private string GenerateCArray(byte[] data, string arrayName)
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine($"const unsigned char {arrayName}[{data.Length}] = {{");
-            const int bytesPerLine = 16;
-            for (int i = 0; i < data.Length; i += bytesPerLine)
-            {
-                sb.Append("  ");
-                for (int j = 0; j < bytesPerLine && i + j < data.Length; j++)
-                {
-                    sb.Append($"0x{data[i + j]:X2}");
-                    if (i + j < data.Length - 1)
-                        sb.Append(", ");
-                }
-                sb.AppendLine();
+                window.UpdateProgress(100, "Resetting device...");
+                await boot.ResetAsync(token).ConfigureAwait(true);
             }
-            sb.AppendLine("};");
-            return sb.ToString();
+            finally
+            {
+                window.CloseFromCode();
+            }
         }
     }
 }

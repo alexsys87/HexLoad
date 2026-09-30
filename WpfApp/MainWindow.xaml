@@ -1,12 +1,12 @@
-﻿<Window x:Class="HexLoad.MainWindow"
+<Window x:Class="HexLoad.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="HexLoad" Height="650" Width="900" Background="#F0F0F0">
     <DockPanel>
-        <!-- Меню -->
+        <!-- Menu -->
         <Menu DockPanel.Dock="Top" Background="White">
             <MenuItem Header="File">
-                <MenuItem Header="Open..." Click="Open_Click" />
+                <MenuItem x:Name="MenuOpen" Header="Open..." Click="Open_Click" />
                 <MenuItem Header="Save as...">
                     <MenuItem Header="Binary (*.bin)" Click="SaveAsBinary_Click" />
                     <MenuItem Header="Intel HEX (*.hex)" Click="SaveAsHex_Click" />
@@ -17,37 +17,31 @@
                 <Separator />
                 <MenuItem Header="Exit" Click="Exit_Click" />
             </MenuItem>
-            <!--<MenuItem Header="Edit" />-->
-            <!--<MenuItem Header="View" />-->
-            <MenuItem Header="Target" >
-                <MenuItem Header="Connect" Click="ConnectButton_Click" />
+            <MenuItem Header="Target">
+                <MenuItem x:Name="MenuConnect" Header="Connect" Click="ConnectButton_Click" />
                 <Separator />
-                <MenuItem Header="Erase" Click="Erase_Click" />
-                <MenuItem Header="Reset" Click="Reset_Click" />
-                <MenuItem Header="Program" Click="ProgramButton_Click" />
+                <MenuItem x:Name="MenuErase" Header="Erase" Click="Erase_Click" />
+                <MenuItem x:Name="MenuReset" Header="Reset" Click="Reset_Click" />
+                <MenuItem x:Name="MenuProgram" Header="Program" Click="ProgramButton_Click" />
             </MenuItem>
-            <MenuItem Header="Options..." Click="Options_Click" />
-                <MenuItem Header="About" Click="About_Click" />
+            <MenuItem x:Name="MenuOptions" Header="Options..." Click="Options_Click" />
+            <MenuItem Header="About" Click="About_Click" />
         </Menu>
 
-        <!-- Статус-бар -->
+        <!-- Status bar -->
         <StatusBar DockPanel.Dock="Bottom" Height="25">
             <TextBlock x:Name="StatusText" Text="Ready" Margin="5,0,0,0" />
         </StatusBar>
 
         <Grid Margin="4">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="61*"/>
-                <ColumnDefinition Width="385*"/>
-            </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
                 <RowDefinition Height="120" />
             </Grid.RowDefinitions>
 
-            <!-- Верхняя панель -->
-            <Grid Grid.Row="0" Grid.ColumnSpan="2" Margin="0,0,0,16">
+            <!-- Top panel -->
+            <Grid Grid.Row="0" Margin="0,0,0,4">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="*" />
@@ -59,40 +53,46 @@
                             <TextBlock Text="File: " />
                             <TextBlock x:Name="FileNameText" Text="None" Foreground="Blue" FontWeight="Bold" />
                         </WrapPanel>
-                        <TextBlock x:Name="ComPortTextBlock" Text="COM Port: COM1" Foreground="Blue" FontWeight="Bold" />
-                        <TextBlock x:Name="BaudRateTextBlock" Text="Baudrate: 9600" Foreground="Blue" FontWeight="Bold" />
+                        <TextBlock x:Name="FileInfoTextBlock" Text="" Foreground="Gray" />
+                        <TextBlock x:Name="ComPortTextBlock" Text="COM Port: -" Foreground="Blue" FontWeight="Bold" />
+                        <TextBlock x:Name="BaudRateTextBlock" Text="Baudrate: -" Foreground="Blue" FontWeight="Bold" />
                     </StackPanel>
                 </GroupBox>
 
                 <GroupBox Header="Target" Grid.Column="1" Margin="2">
-                    <StackPanel>
-                        <TextBlock x:Name="TargetStatus" Text="Not connected" Foreground="Red" FontWeight="Bold" Margin="5"/>
-                        <TextBlock x:Name="TargetVersion" Text="" Visibility="Collapsed" Margin="5,0"/>
-                        <TextBlock x:Name="TargetProduct" Text="" Visibility="Collapsed" Margin="5,0"/>
-                        <TextBlock x:Name="TargetPages" Text="" Visibility="Collapsed" Margin="5,0"/>
-                        <TextBlock x:Name="TargetPageSize" Text="" Visibility="Collapsed" Margin="5,0"/>
+                    <StackPanel Margin="5">
+                        <TextBlock x:Name="TargetStatus" Text="Not connected" Foreground="Red" FontWeight="Bold" />
+                        <TextBlock x:Name="TargetVersion" Text="" Visibility="Collapsed" />
+                        <TextBlock x:Name="TargetProduct" Text="" Visibility="Collapsed" />
+                        <TextBlock x:Name="TargetPages" Text="" Visibility="Collapsed" />
+                        <TextBlock x:Name="TargetPageSize" Text="" Visibility="Collapsed" />
                     </StackPanel>
                 </GroupBox>
             </Grid>
 
-            <!-- HEX Редактор -->
-            <GroupBox Header="Current data" Margin="2,87,2,2" Grid.ColumnSpan="2" Grid.RowSpan="2">
+            <!-- Hex view -->
+            <GroupBox Header="Current data" Grid.Row="1" Margin="2">
                 <DockPanel>
                     <StackPanel Orientation="Horizontal" DockPanel.Dock="Top" Margin="5">
                         <TextBlock Text="Address:" VerticalAlignment="Center" Margin="0,0,5,0" />
-                        <TextBox x:Name="AddressInput"  Width="60" Text="0x0" VerticalContentAlignment="Center" KeyDown="AddressInput_KeyDown" />
+                        <TextBox x:Name="AddressInput" Width="80" Text="0x0" VerticalContentAlignment="Center"
+                                 KeyDown="AddressInput_KeyDown" />
                         <Button Content="x1" Click="Mode_Click" Tag="1" Margin="5,0,0,0" Width="25" />
                         <Button Content="x2" Click="Mode_Click" Tag="2" Margin="2,0,0,0" Width="25" />
                         <Button Content="x4" Click="Mode_Click" Tag="4" Margin="2,0,0,0" Width="25" />
                     </StackPanel>
 
-                    <DataGrid x:Name="HexGrid" Background="White" FontFamily="Courier New" FontSize="12" 
-                  IsReadOnly="True" HeadersVisibility="Column" AutoGenerateColumns="False"
-                  GridLinesVisibility="All" HorizontalGridLinesBrush="LightGray" VerticalGridLinesBrush="LightGray">
+                    <DataGrid x:Name="HexGrid" Background="White" FontFamily="Courier New" FontSize="12"
+                              IsReadOnly="True" HeadersVisibility="Column" AutoGenerateColumns="False"
+                              CanUserSortColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
+                              CanUserReorderColumns="False" SelectionUnit="Cell"
+                              EnableRowVirtualization="True" EnableColumnVirtualization="False"
+                              VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                              GridLinesVisibility="All" HorizontalGridLinesBrush="LightGray" VerticalGridLinesBrush="LightGray">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Address" Binding="{Binding Address}" Width="65" Foreground="Gray" />
+                            <DataGridTextColumn Header="Address" Binding="{Binding Address}" Width="80" Foreground="Gray" />
 
-                            <!-- 16 колонок данных без мусорных символов -->
+                            <!-- 16 data columns -->
                             <DataGridTextColumn Header="0" Binding="{Binding B0}" Width="Auto" MinWidth="35" />
                             <DataGridTextColumn Header="1" Binding="{Binding B1}" Width="Auto" MinWidth="35" />
                             <DataGridTextColumn Header="2" Binding="{Binding B2}" Width="Auto" MinWidth="35" />
@@ -116,10 +116,9 @@
                 </DockPanel>
             </GroupBox>
 
-
-            <!-- Лог -->
-            <GroupBox Header="Log" Grid.Row="2" Margin="2,2,2,2" Grid.ColumnSpan="2">
-                <TextBox x:Name="LogTextBox" IsReadOnly="True" VerticalScrollBarVisibility="Auto" 
+            <!-- Log -->
+            <GroupBox Header="Log" Grid.Row="2" Margin="2">
+                <TextBox x:Name="LogTextBox" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
                          BorderThickness="0" Background="Transparent" FontFamily="Consolas" />
             </GroupBox>
         </Grid>

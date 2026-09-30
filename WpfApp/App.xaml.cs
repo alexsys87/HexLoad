@@ -1,5 +1,3 @@
-﻿using System.Configuration;
-using System.Data;
 using System.Windows;
 
 namespace HexLoad
@@ -10,5 +8,4 @@ namespace HexLoad
     public partial class App : Application
     {
     }
-
 }

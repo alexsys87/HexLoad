@@ -1,65 +1,53 @@
 /*
- * STM32 Bootloader Protocol Description
- * =======================================
+ * STM32 Bootloader Protocol (host side)
+ * =====================================
  *
- * This bootloader communicates over UART at a fixed baud rate (default 115200)
- * using a simple packet-based protocol. Each packet consists of a 16-byte header
- * followed by optional data. All multi-byte fields are transmitted in little-endian
- * order (least significant byte first).
+ * Reference firmware: main.c, STM32F030 (Cortex-M0), UART 115200 8N1.
  *
- * Packet Header (16 bytes):
- *   Bytes 0-3:   Command code (uint32_t)
- *   Bytes 4-7:   Address (uint32_t) – used only for Program command
- *   Bytes 8-11:  Data size (uint32_t) – number of bytes in the data field
- *   Bytes 12-15: CRC (uint32_t) – checksum of either the data (if present) or the
- *                first 12 bytes of the header (cmd+addr+size) if no data.
+ * Framing
+ *   The bootloader receives into a DMA buffer (16 + 1024 bytes) and treats the
+ *   USART IDLE-line event as the end of a packet. Therefore a packet (header plus
+ *   optional data) MUST be transmitted as one continuous burst: any pause longer
+ *   than one character time (~87 us at 115200) splits it into two packets.
+ *   This host always writes a complete packet with a single Write() call.
  *
- * Commands (sent by host):
- *   CMD_CONNECT = 0x01 – Establish connection and check bootloader presence.
- *   CMD_GETINFO = 0x02 – Request device information (version, product ID, flash layout).
- *   CMD_ERASE   = 0x03 – Erase all application flash pages.
- *   CMD_PROG    = 0x04 – Program a page of data at specified address.
- *   CMD_RESET   = 0x05 – Reset the MCU and jump to application.
+ * Packet header (16 bytes, all fields uint32 little-endian)
+ *   cmd  : command code (in replies: command | status)
+ *   addr : offset from the application start address (CMD_PROG only, else 0)
+ *   size : number of data bytes following the header
+ *   crc  : see "CRC" below
  *
- * Response codes (in the header of the reply):
- *   CMD_OK      = 0x40 – ORed with the original command to indicate success.
- *   CMD_ERROR   = 0x80 – ORed with the original command to indicate an error.
+ * Commands
+ *   0x01 CMD_CONNECT - no data, reply cmd|0x40; stops the bootloader timeout
+ *   0x02 CMD_GETINFO - no data, reply header + 16-byte info
+ *   0x03 CMD_ERASE   - no data, erases the whole application area, reply status
+ *   0x04 CMD_PROG    - data = one page (size <= page_size, multiple of 4),
+ *                      written at APPLICATION_ADDRESS + addr and verified
+ *   0x05 CMD_RESET   - no data, MCU resets immediately, NO reply
  *
- * Data fields:
- *   - For CMD_GETINFO response: 16-byte structure containing:
- *       version   (uint32_t): Bootloader version.
- *       product   (uint32_t): Product identifier.
- *       pages     (uint32_t): Total number of flash pages.
- *       page_size (uint32_t): Size of each flash page in bytes.
- *   - For CMD_PROG request: the firmware data (size specified in header).
- *     The data is not aligned – the host sends exactly the number of bytes
- *     indicated in the size field.
+ * Status bits (ORed into cmd of the reply)
+ *   0x40 OK, 0x80 error (CRC mismatch, erase/verify failure)
+ *   An unknown command is answered with a single byte 0x80 (no header).
  *
- * Communication flow:
- *   1. Host sends CMD_CONNECT, bootloader replies with CMD_CONNECT|CMD_OK.
- *   2. Host sends CMD_GETINFO, bootloader replies with info structure and CRC.
- *   3. Host sends CMD_ERASE, bootloader erases flash and replies with CMD_ERASE|CMD_OK.
- *   4. Host repeatedly sends CMD_PROG for each page, with address and data.
- *      Bootloader verifies CRC, programs the page, and replies with CMD_PROG|CMD_OK.
- *   5. Host sends CMD_RESET, bootloader resets and (optionally) jumps to application.
+ * Info structure (reply to CMD_GETINFO)
+ *   version, product, pages (application pages), page_size
  *
- * CRC Calculation:
- *   The CRC is computed using the STM32 hardware CRC algorithm (polynomial 0x04C11DB7)
- *   with initial value 0xFFFFFFFF. The implementation processes data byte-by-byte
- *   (or word-by-word) and yields the same result as the STM32 hardware peripheral.
- *   For commands without data, the CRC is calculated over the first 12 bytes of the header.
- *   For commands with data (e.g., CMD_PROG request, CMD_GETINFO response), the CRC is
- *   calculated over the data field only. The header's CRC field is then set to that value.
+ * CRC (STM32 hardware CRC: poly 0x04C11DB7, init 0xFFFFFFFF, 32-bit words)
+ *   host request without data : CRC of the first 12 header bytes (not checked by firmware)
+ *   host request with data    : CRC of the data (checked by firmware)
+ *   reply without data        : CRC of the 16 header bytes with crc field = 0
+ *   reply with data (info)    : CRC of the 16 info bytes (checked by host)
  *
- * Timeouts:
- *   The bootloader uses a 1-second timeout after reset. If no connection is established
- *   within that time, it assumes no host is present and jumps to the application.
- *
- * This protocol is used by the HexLoad application and emulated by the corresponding
- * Windows emulator for testing.
+ * Timing
+ *   After reset the bootloader waits COMM_TIMEOUT = 3000 ms for CMD_CONNECT,
+ *   then jumps to the application.
  */
 
+using System;
+using System.Buffers.Binary;
 using System.IO.Ports;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace HexLoad
 {
@@ -70,15 +58,20 @@ namespace HexLoad
         public uint Size;
         public uint Crc;
     }
+
     public struct BootInfo
     {
         public uint Version;
         public uint Product;
-        public uint Pages;
+        public uint Pages;      // number of pages in the application area
         public uint PageSize;
+
+        public uint FlashSize => Pages * PageSize;
+
+        public string VersionString =>
+            $"{(Version >> 24) & 0xFF}.{(Version >> 16) & 0xFF}.{(Version >> 8) & 0xFF}.{Version & 0xFF}";
     }
 
-    // Команды и маски
     public static class BootCommands
     {
         public const uint CmdConnect = 1;
@@ -90,194 +83,365 @@ namespace HexLoad
         public const uint CompleteMask = 0x40;
         public const uint ErrorMask = 0x80;
     }
-    public class Bootloader : IDisposable
-    {
-        private SerialPort _serialPort;
-        private readonly int _readTimeout = 1000;  // T1, T2, T3 в мс
 
-        public string PortName { get; private set; }
-        public int BaudRate { get; private set; }
+    /// <summary>Protocol-level error: the device replied with an error status or an unexpected packet.</summary>
+    public sealed class BootloaderException : Exception
+    {
+        public uint ResponseCmd { get; }
+
+        public BootloaderException(string message, uint responseCmd = 0) : base(message)
+        {
+            ResponseCmd = responseCmd;
+        }
+    }
+
+    /// <summary>
+    /// Host side of the STM32 UART bootloader protocol.
+    /// Blocking serial I/O runs on the thread pool; access to the port is serialized.
+    /// </summary>
+    public sealed class Bootloader : IDisposable
+    {
+        public const int HeaderSize = 16;
+        private const int InfoSize = 16;
+
+        private readonly SerialPort _port;
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        private readonly byte[] _rxHeader = new byte[HeaderSize];
+        private readonly byte[] _infoBuffer = new byte[InfoSize];
+        private byte[] _frame = new byte[HeaderSize];   // header + data, sent with one Write()
+        private bool _disposed;
+
+        public string PortName { get; }
+        public int BaudRate { get; }
+
         public BootInfo DeviceInfo { get; private set; }
+        public bool HasDeviceInfo { get; private set; }
+
+        /// <summary>Timeout of a regular command (connect/info/prog), ms.</summary>
+        public int CommandTimeoutMs { get; set; } = 1000;
+
+        /// <summary>Timeout of the flash erase command, ms.</summary>
+        public int EraseTimeoutMs { get; set; } = 30000;
+
+        /// <summary>
+        /// Delay between pages, ms. The bootloader replies to CMD_PROG only after the page
+        /// has been programmed and verified, so no delay is needed by default.
+        /// </summary>
+        public int InterPageDelayMs { get; set; }
 
         public Bootloader(string portName, int baudRate)
         {
+            if (string.IsNullOrWhiteSpace(portName))
+                throw new ArgumentException("COM port name is not set.", nameof(portName));
+            if (baudRate <= 0)
+                throw new ArgumentOutOfRangeException(nameof(baudRate), "Baud rate must be positive.");
+
             PortName = portName;
             BaudRate = baudRate;
-            _serialPort = new SerialPort(portName, baudRate, Parity.None, 8, StopBits.One);
-            _serialPort.ReadTimeout = _readTimeout;
-            _serialPort.WriteTimeout = _readTimeout;
+
+            _port = new SerialPort(portName, baudRate, Parity.None, 8, StopBits.One)
+            {
+                Handshake = Handshake.None,
+                ReadTimeout = CommandTimeoutMs,
+                WriteTimeout = CommandTimeoutMs,
+                ReadBufferSize = 8192,
+                WriteBufferSize = 8192,
+            };
         }
+
+        public bool IsOpen => !_disposed && _port.IsOpen;
 
         public void Open()
         {
-            if (!_serialPort.IsOpen)
-                _serialPort.Open();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!_port.IsOpen)
+            {
+                _port.Open();
+                _port.DiscardInBuffer();
+                _port.DiscardOutBuffer();
+            }
         }
 
         public void Close()
         {
-            if (_serialPort?.IsOpen == true)
-                _serialPort.Close();
+            if (!_disposed && _port.IsOpen)
+            {
+                try { _port.Close(); } catch (Exception) { /* the adapter may have been unplugged */ }
+            }
         }
 
-        public void Dispose() => Close();
-
-        // Отправка заголовка и приём ответа
-        private BootHeader SendCommandAndReceive(uint command, uint addr, byte[]? data = null)
+        public void Dispose()
         {
-            var header = new BootHeader
-            {
-                Cmd = command,
-                Addr = addr,
-                Size = (uint)(data?.Length ?? 0),
-                //Crc = 0
-            };
+            if (_disposed) return;
+            _disposed = true;
+            try { if (_port.IsOpen) _port.Close(); } catch (Exception) { }
+            _port.Dispose();
+            _gate.Dispose();
+        }
 
-            if (data != null && data.Length > 0)
+        // ==================== Low level (runs on the thread pool) ====================
+
+        /// <summary>
+        /// Builds header + data in one buffer and sends it with a single Write() call,
+        /// so the packet leaves the adapter as one burst without an IDLE gap inside.
+        /// </summary>
+        private void SendPacket(uint command, uint addr, byte[]? data, int dataLength)
+        {
+            int total = HeaderSize + dataLength;
+            if (_frame.Length < total) _frame = new byte[total];
+
+            Span<byte> hdr = _frame.AsSpan(0, HeaderSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(hdr.Slice(0), command);
+            BinaryPrimitives.WriteUInt32LittleEndian(hdr.Slice(4), addr);
+            BinaryPrimitives.WriteUInt32LittleEndian(hdr.Slice(8), (uint)dataLength);
+
+            uint crc;
+            if (dataLength > 0)
             {
-                header.Crc = Stm32Crc32.Compute(0xFFFFFFFF, data, 0, data.Length);
+                Buffer.BlockCopy(data!, 0, _frame, HeaderSize, dataLength);
+                crc = Stm32Crc32.Compute(Stm32Crc32.InitialValue, _frame.AsSpan(HeaderSize, dataLength));
             }
             else
             {
-                byte[] headerBytes = new byte[12];
-                Buffer.BlockCopy(BitConverter.GetBytes(header.Cmd),  0, headerBytes, 0, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes(header.Addr), 0, headerBytes, 4, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes(header.Size), 0, headerBytes, 8, 4);
-                header.Crc = Stm32Crc32.Compute(0xFFFFFFFF, headerBytes, 0, 12);
+                crc = Stm32Crc32.Compute(Stm32Crc32.InitialValue, hdr.Slice(0, 12));
             }
+            BinaryPrimitives.WriteUInt32LittleEndian(hdr.Slice(12), crc);
 
-            byte[] headerOut = new byte[16];
-            Buffer.BlockCopy(BitConverter.GetBytes(header.Cmd),  0, headerOut, 0,  4);
-            Buffer.BlockCopy(BitConverter.GetBytes(header.Addr), 0, headerOut, 4,  4);
-            Buffer.BlockCopy(BitConverter.GetBytes(header.Size), 0, headerOut, 8,  4);
-            Buffer.BlockCopy(BitConverter.GetBytes(header.Crc),  0, headerOut, 12, 4);
-            _serialPort.Write(headerOut, 0, 16);
-
-            if (command == 5) return new BootHeader { Cmd = 5, Addr = 0, Size = 0, Crc = 0 };
-
-            if (data != null && data.Length > 0)
-                _serialPort.Write(data, 0, data.Length);
-
-            byte[] responseHeader = new byte[16];
-            int read = 0;
-            while (read < 16)
-                read += _serialPort.Read(responseHeader, read, 16 - read);
-
-            BootHeader response;
-            response.Cmd = BitConverter.ToUInt32(responseHeader, 0);
-            response.Addr = BitConverter.ToUInt32(responseHeader, 4);
-            response.Size = BitConverter.ToUInt32(responseHeader, 8);
-            response.Crc = BitConverter.ToUInt32(responseHeader, 12);
-            return response;
+            _port.Write(_frame, 0, total);
         }
 
-        public async Task<bool> ConnectAsync(CancellationToken token = default)
+        private void ReadExact(byte[] buffer, int count, long deadline, CancellationToken token)
         {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    Open();
-                    var response = SendCommandAndReceive(BootCommands.CmdConnect, 0);
-                    return response.Cmd == (BootCommands.CompleteMask | BootCommands.CmdConnect);
-                }
-                catch
-                {
-                    return false;
-                }
-            }, token);
-        }
-
-        public async Task<BootInfo> GetInfoAsync(CancellationToken token = default)
-        {
-            // Отправляем команду и получаем заголовок ответа
-            var response = SendCommandAndReceive(BootCommands.CmdInfo, 0);
-            if (response.Cmd != (BootCommands.CompleteMask | BootCommands.CmdInfo))
-                throw new Exception("Info command failed");
-            if (response.Size != 16)
-                throw new Exception($"Invalid info size: {response.Size}, expected 16");
-
-            // Асинхронно читаем 16 байт информации
-            byte[] infoBytes = new byte[16];
             int read = 0;
-            while (read < 16)
+            while (read < count)
             {
                 token.ThrowIfCancellationRequested();
-                int bytesRead = await _serialPort.BaseStream.ReadAsync(infoBytes, read, 16 - read, token).ConfigureAwait(false);
-                if (bytesRead == 0)
-                    throw new TimeoutException("Timeout reading info data");
-                read += bytesRead;
+
+                int remaining = (int)(deadline - Environment.TickCount64);
+                if (remaining <= 0)
+                    throw new TimeoutException($"No response from device ({read} of {count} bytes received).");
+
+                _port.ReadTimeout = remaining;
+
+                int n;
+                try
+                {
+                    n = _port.Read(buffer, read, count - read);
+                }
+                catch (TimeoutException)
+                {
+                    throw new TimeoutException($"No response from device ({read} of {count} bytes received).");
+                }
+
+                if (n <= 0)
+                    throw new TimeoutException($"Port closed while reading ({read} of {count} bytes received).");
+
+                read += n;
             }
-
-            // Вычисляем CRC полученных данных и сравниваем с ожидаемым
-            uint crcCalc = Stm32Crc32.Compute(0xFFFFFFFF, infoBytes, 0, 16);
-            if (crcCalc != response.Crc)
-                throw new Exception($"Info CRC mismatch: expected {response.Crc:X8}, got {crcCalc:X8}");
-
-            // Сохраняем информацию об устройстве
-            DeviceInfo = new BootInfo
-            {
-                Version = BitConverter.ToUInt32(infoBytes, 0),
-                Product = BitConverter.ToUInt32(infoBytes, 4),
-                Pages = BitConverter.ToUInt32(infoBytes, 8),
-                PageSize = BitConverter.ToUInt32(infoBytes, 12)
-            };
-            return DeviceInfo;
         }
 
-        public async Task EraseAsync(CancellationToken token = default)
+        /// <summary>Waits until the transmit buffer is physically sent (required before closing the port).</summary>
+        private void DrainOutput(long deadline)
         {
-            await Task.Run(() =>
+            while (_port.BytesToWrite > 0 && Environment.TickCount64 < deadline)
+                Thread.Sleep(1);
+        }
+
+        /// <summary>Sends a packet and receives the reply header. CMD_RESET has no reply.</summary>
+        private BootHeader Transact(uint command, uint addr, byte[]? data, int dataLength,
+                                    int timeoutMs, CancellationToken token)
+        {
+            long deadline = Environment.TickCount64 + timeoutMs;
+
+            _port.WriteTimeout = timeoutMs;
+            _port.DiscardInBuffer();     // drop stray bytes (e.g. a 1-byte 0x80 reply to garbage)
+
+            SendPacket(command, addr, data, dataLength);
+
+            if (command == BootCommands.CmdReset)
             {
-                var response = SendCommandAndReceive(BootCommands.CmdErase, 0);
-                if (response.Cmd != (BootCommands.CompleteMask | BootCommands.CmdErase))
-                    throw new Exception("Erase failed");
+                // No reply, but the packet must actually leave the adapter:
+                // closing the port right after the call would truncate it.
+                DrainOutput(deadline);
+                Thread.Sleep(HeaderSize * 10 * 1000 / BaudRate + 2);
+                return new BootHeader { Cmd = BootCommands.CmdReset };
+            }
+
+            ReadExact(_rxHeader, HeaderSize, deadline, token);
+
+            return new BootHeader
+            {
+                Cmd = BinaryPrimitives.ReadUInt32LittleEndian(_rxHeader.AsSpan(0)),
+                Addr = BinaryPrimitives.ReadUInt32LittleEndian(_rxHeader.AsSpan(4)),
+                Size = BinaryPrimitives.ReadUInt32LittleEndian(_rxHeader.AsSpan(8)),
+                Crc = BinaryPrimitives.ReadUInt32LittleEndian(_rxHeader.AsSpan(12)),
+            };
+        }
+
+        private static void EnsureOk(BootHeader response, uint command, string operation)
+        {
+            if (response.Cmd == (BootCommands.CompleteMask | command)) return;
+
+            if (response.Cmd == (BootCommands.ErrorMask | command))
+                throw new BootloaderException($"{operation}: device reported an error.", response.Cmd);
+
+            throw new BootloaderException(
+                $"{operation}: unexpected response 0x{response.Cmd:X8} " +
+                $"(expected 0x{BootCommands.CompleteMask | command:X8}).", response.Cmd);
+        }
+
+        /// <summary>Acquires the port and runs a blocking exchange on the thread pool.</summary>
+        private async Task<T> RunExclusiveAsync<T>(Func<T> action, CancellationToken token)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            await _gate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                return await Task.Run(action, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+
+        // ==================== Commands ====================
+
+        /// <summary>Establishes the connection. Exceptions are propagated so the caller can report the cause.</summary>
+        public Task<bool> ConnectAsync(CancellationToken token = default)
+        {
+            return RunExclusiveAsync(() =>
+            {
+                Open();
+                var response = Transact(BootCommands.CmdConnect, 0, null, 0, CommandTimeoutMs, token);
+                return response.Cmd == (BootCommands.CompleteMask | BootCommands.CmdConnect);
             }, token);
         }
 
-        public async Task ProgramAsync(byte[] firmware, IProgress<int> progress, CancellationToken token)
+        public Task<BootInfo> GetInfoAsync(CancellationToken token = default)
         {
-            if (DeviceInfo.Equals(default(BootInfo)))
-                throw new InvalidOperationException("Device info not loaded. Call GetInfoAsync first.");
+            return RunExclusiveAsync(() =>
+            {
+                Open();
+                long deadline = Environment.TickCount64 + CommandTimeoutMs;
+
+                var response = Transact(BootCommands.CmdInfo, 0, null, 0, CommandTimeoutMs, token);
+                EnsureOk(response, BootCommands.CmdInfo, "Get info");
+
+                if (response.Size != InfoSize)
+                    throw new BootloaderException(
+                        $"Get info: invalid data size {response.Size}, expected {InfoSize}.");
+
+                ReadExact(_infoBuffer, InfoSize, deadline, token);
+
+                uint crc = Stm32Crc32.Compute(Stm32Crc32.InitialValue, _infoBuffer);
+                if (crc != response.Crc)
+                    throw new BootloaderException(
+                        $"Get info: CRC mismatch (expected {response.Crc:X8}, got {crc:X8}).");
+
+                var info = new BootInfo
+                {
+                    Version = BinaryPrimitives.ReadUInt32LittleEndian(_infoBuffer.AsSpan(0)),
+                    Product = BinaryPrimitives.ReadUInt32LittleEndian(_infoBuffer.AsSpan(4)),
+                    Pages = BinaryPrimitives.ReadUInt32LittleEndian(_infoBuffer.AsSpan(8)),
+                    PageSize = BinaryPrimitives.ReadUInt32LittleEndian(_infoBuffer.AsSpan(12)),
+                };
+
+                if (info.PageSize == 0 || info.Pages == 0 || (info.PageSize & 3) != 0)
+                    throw new BootloaderException(
+                        $"Device reported an invalid flash layout: {info.Pages} pages of {info.PageSize} bytes.");
+
+                DeviceInfo = info;
+                HasDeviceInfo = true;
+                return info;
+            }, token);
+        }
+
+        public Task EraseAsync(CancellationToken token = default)
+        {
+            return RunExclusiveAsync<object?>(() =>
+            {
+                Open();
+                var response = Transact(BootCommands.CmdErase, 0, null, 0, EraseTimeoutMs, token);
+                EnsureOk(response, BootCommands.CmdErase, "Erase");
+                return null;
+            }, token);
+        }
+
+        public Task ResetAsync(CancellationToken token = default)
+        {
+            return RunExclusiveAsync<object?>(() =>
+            {
+                Open();
+                Transact(BootCommands.CmdReset, 0, null, 0, CommandTimeoutMs, token);
+                HasDeviceInfo = false;
+                return null;
+            }, token);
+        }
+
+        /// <summary>
+        /// Programs the image page by page. addr of every page is its offset from the
+        /// start of the image; the bootloader writes it at APPLICATION_ADDRESS + addr.
+        /// progress receives values 0..100.
+        /// </summary>
+        public async Task ProgramAsync(byte[] firmware, IProgress<int>? progress, CancellationToken token = default)
+        {
+            ArgumentNullException.ThrowIfNull(firmware);
+            if (!HasDeviceInfo)
+                throw new InvalidOperationException("No device info - call GetInfoAsync first.");
+            if (firmware.Length == 0)
+                throw new ArgumentException("Firmware image is empty.", nameof(firmware));
 
             uint pageSize = DeviceInfo.PageSize;
+            uint flashSize = DeviceInfo.FlashSize;
+            if ((uint)firmware.Length > flashSize)
+                throw new ArgumentException(
+                    $"Image size {firmware.Length} bytes exceeds the application area of {flashSize} bytes.",
+                    nameof(firmware));
+
             uint totalSize = (uint)firmware.Length;
             uint written = 0;
+            int lastPercent = -1;
+
+            // One page buffer for the whole image (page_size is a multiple of 4, checked in GetInfoAsync)
+            byte[] pageData = new byte[pageSize];
 
             while (written < totalSize)
             {
                 token.ThrowIfCancellationRequested();
 
                 uint chunkSize = Math.Min(pageSize, totalSize - written);
-                uint alignedSize = (chunkSize + 3) & ~3u; // округление вверх до кратного 4
-                byte[] pageData = new byte[alignedSize];
-                Array.Copy(firmware, written, pageData, 0, (int)chunkSize);
-                for (int i = (int)chunkSize; i < alignedSize; i++)
-                    pageData[i] = 0xFF; // заполняем хвост 0xFF
+                int alignedSize = (int)((chunkSize + 3) & ~3u);   // firmware programs whole 32-bit words
 
-                // Отправляем команду с данными (CRC вычисляется от pageData, размер в заголовке = alignedSize)
-                var response = await Task.Run(() => SendCommandAndReceive(BootCommands.CmdProg, written, pageData), token).ConfigureAwait(false);
+                Buffer.BlockCopy(firmware, (int)written, pageData, 0, (int)chunkSize);
+                pageData.AsSpan((int)chunkSize, alignedSize - (int)chunkSize).Fill(0xFF);
+
+                uint address = written;
+                int size = alignedSize;
+
+                var response = await RunExclusiveAsync(() =>
+                {
+                    Open();
+                    return Transact(BootCommands.CmdProg, address, pageData, size, CommandTimeoutMs, token);
+                }, token).ConfigureAwait(false);
 
                 if (response.Cmd != (BootCommands.CompleteMask | BootCommands.CmdProg))
+                    throw new BootloaderException(
+                        $"Page write failed at offset 0x{written:X8}: response 0x{response.Cmd:X8}.",
+                        response.Cmd);
+
+                if (InterPageDelayMs > 0)
+                    await Task.Delay(InterPageDelayMs, token).ConfigureAwait(false);
+
+                written += chunkSize;
+
+                int percent = (int)(written * 100L / totalSize);
+                if (percent != lastPercent)
                 {
-                    throw new Exception($"Program page failed at offset 0x{written:X}, response command: 0x{response.Cmd:X2}");
+                    lastPercent = percent;
+                    progress?.Report(percent);
                 }
-
-                // Небольшая задержка между страницами
-                await Task.Delay(10, token).ConfigureAwait(false);
-
-                written += chunkSize; // увеличиваем на реальный размер (не дополненный)
-                progress?.Report((int)(written * 100 / totalSize));
             }
-        }
-
-        public async Task ResetAsync(CancellationToken token = default)
-        {
-            await Task.Run(() =>
-            {
-                var response = SendCommandAndReceive(BootCommands.CmdReset, 0);
-                // После сброса ответ может не прийти, поэтому не проверяем
-            }, token);
         }
     }
 }
