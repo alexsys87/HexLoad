@@ -10,6 +10,8 @@
  *     USART RX runs through DMA into buff[]; the USART IDLE-line flag marks
  *     the end of a packet. The host MUST send header and data as one continuous
  *     burst - a pause longer than one character time splits the packet in two.
+ *     An IDLE event with no bytes received is ignored; bytes beyond
+ *     DMA_BUFF_SIZE are dropped.
  *
  *   Packet structure (P_Header, 16 bytes, little-endian):
  *     +--------+--------+--------+--------+
@@ -61,9 +63,11 @@
  *
  * @implementation
  *   No interrupts are used: the main loop polls the USART IDLE flag and the
- *   SysTick COUNTFLAG. Only the first vector table entries (initial SP,
- *   Reset_Handler, NMI, HardFault) are ever fetched, so the startup file may
- *   use a 4-entry vector table.
+ *   SysTick COUNTFLAG. Only the first four vector table entries (initial SP,
+ *   Reset, NMI, HardFault) are ever fetched, so startup.c provides a 4-entry
+ *   vector table instead of the full 48-entry one and the whole bootloader
+ *   fits into one 1 KB flash page. Do not enable any interrupt here without
+ *   restoring the full vector table.
  *
  * @note The bootloader occupies the first 2 KB of flash (0x08000000-0x080007FF),
  *       the application starts at 0x08000800.
@@ -291,8 +295,10 @@ static void InitHardware(void)
 
     /* PA2/PA3 alternate function AF1 (USART1). Runs right after reset, so the
        registers hold their reset values and can be written directly
-       (MODER keeps PA13/PA14 in AF mode for SWD). */
+       (MODER/PUPDR keep PA13/PA14 in AF mode with their pulls for SWD).
+       Pull-up on PA3 (RX): an unconnected RX line stays idle instead of floating. */
     GPIOA->MODER  = 0x28000000 | GPIO_MODER_MODER2_1 | GPIO_MODER_MODER3_1;
+    GPIOA->PUPDR  = 0x24000000 | GPIO_PUPDR_PUPDR3_0;
     GPIOA->AFR[0] = (1 << (2 * 4)) | (1 << (3 * 4));
 
     /* DMA1 Channel3: USART1_RX -> buff, memory increment, 8-bit */
@@ -305,9 +311,10 @@ static void InitHardware(void)
     USART1->CR3 = USART_CR3_DMAR;
     USART1->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
 
-    /* Wait for the idle frame after enabling the receiver and discard it */
-    while (!(USART1->ISR & USART_ISR_IDLE)) {}
-    USART1->ICR = USART_ICR_IDLECF;
+    /* The first IDLE event after enabling the receiver carries no data; it is
+       skipped in main(). Not waiting for it here: with the RX line held low
+       (e.g. an unpowered USB-UART adapter) it never comes, and the bootloader
+       would never start the application. */
 
     /* SysTick: 1 ms period, polled via COUNTFLAG (no interrupt) */
     SysTick->LOAD = CPU_FREQ / 1000 - 1;
@@ -373,9 +380,17 @@ int main(void) {
 
         /* End of packet: restart DMA for the next one, then process this one */
         if (USART1->ISR & USART_ISR_IDLE) {
-            USART1->ICR = USART_ICR_IDLECF;
+            USART1->ICR = USART_ICR_IDLECF | USART_ICR_ORECF;
+
+            /* Nothing received (the first idle frame after enabling the
+               receiver): not a packet, buff[] still holds old data */
+            if (DMA1_Channel3->CNDTR == DMA_BUFF_SIZE)
+                continue;
 
             DMA1_Channel3->CCR   = DMA_CCR_MINC;
+            /* Drop a byte left in RDR after an overlong packet (DMA stopped at
+               CNDTR = 0), otherwise it would become the first byte of the next packet */
+            USART1->RQR          = USART_RQR_RXFRQ;
             DMA1_Channel3->CNDTR = DMA_BUFF_SIZE;
             DMA1_Channel3->CCR   = DMA_CCR_MINC | DMA_CCR_EN;
 
