@@ -99,7 +99,7 @@
                 <option>
                     <name>GBECoreSlave</name>
                     <version>35</version>
-                    <state>39</state>
+                    <state>38</state>
                 </option>
                 <option>
                     <name>OGUseCmsis</name>
@@ -116,7 +116,7 @@
                 <option>
                     <name>CoreVariant</name>
                     <version>35</version>
-                    <state>39</state>
+                    <state>38</state>
                 </option>
                 <option>
                     <name>GFPUDeviceSlave</name>
@@ -139,7 +139,7 @@
                 <option>
                     <name>GFPUCoreSlave2</name>
                     <version>35</version>
-                    <state>39</state>
+                    <state>38</state>
                 </option>
                 <option>
                     <name>OGCMSISPackSelectDevice</name>
@@ -214,7 +214,7 @@
                 <option>
                     <name>OG_32_64DeviceCoreSlave</name>
                     <version>35</version>
-                    <state>39</state>
+                    <state>38</state>
                 </option>
                 <option>
                     <name>GOutputSo</name>
@@ -1214,7 +1214,7 @@
                 <option>
                     <name>GBECoreSlave</name>
                     <version>35</version>
-                    <state>39</state>
+                    <state>38</state>
                 </option>
                 <option>
                     <name>OGUseCmsis</name>
@@ -1231,7 +1231,7 @@
                 <option>
                     <name>CoreVariant</name>
                     <version>35</version>
-                    <state>39</state>
+                    <state>38</state>
                 </option>
                 <option>
                     <name>GFPUDeviceSlave</name>
@@ -1254,7 +1254,7 @@
                 <option>
                     <name>GFPUCoreSlave2</name>
                     <version>35</version>
-                    <state>39</state>
+                    <state>38</state>
                 </option>
                 <option>
                     <name>OGCMSISPackSelectDevice</name>
@@ -1329,7 +1329,7 @@
                 <option>
                     <name>OG_32_64DeviceCoreSlave</name>
                     <version>35</version>
-                    <state>39</state>
+                    <state>38</state>
                 </option>
                 <option>
                     <name>GOutputSo</name>
