@@ -74,7 +74,7 @@
                 </option>
                 <option>
                     <name>OGChipSelectEditMenu</name>
-                    <state>STM32F030F4	ST STM32F030F4</state>
+                    <state>STM32F411CE	ST STM32F411CE</state>
                 </option>
                 <option>
                     <name>GenLowLevelInterface</name>
@@ -99,7 +99,7 @@
                 <option>
                     <name>GBECoreSlave</name>
                     <version>35</version>
-                    <state>34</state>
+                    <state>40</state>
                 </option>
                 <option>
                     <name>OGUseCmsis</name>
@@ -116,11 +116,11 @@
                 <option>
                     <name>CoreVariant</name>
                     <version>35</version>
-                    <state>34</state>
+                    <state>40</state>
                 </option>
                 <option>
                     <name>GFPUDeviceSlave</name>
-                    <state>STM32F030F4	ST STM32F030F4</state>
+                    <state>STM32F411CE	ST STM32F411CE</state>
                 </option>
                 <option>
                     <name>FPU2</name>
@@ -139,7 +139,7 @@
                 <option>
                     <name>GFPUCoreSlave2</name>
                     <version>35</version>
-                    <state>34</state>
+                    <state>40</state>
                 </option>
                 <option>
                     <name>OGCMSISPackSelectDevice</name>
@@ -214,7 +214,7 @@
                 <option>
                     <name>OG_32_64DeviceCoreSlave</name>
                     <version>35</version>
-                    <state>34</state>
+                    <state>40</state>
                 </option>
                 <option>
                     <name>GOutputSo</name>
@@ -235,7 +235,7 @@
                 </option>
                 <option>
                     <name>CCDefines</name>
-                    <state>STM32F030x6</state>
+                    <state>STM32F411xE</state>
                 </option>
                 <option>
                     <name>CCPreprocFile</name>
@@ -356,7 +356,7 @@
                 </option>
                 <option>
                     <name>CCIncludePath2</name>
-                    <state>$PROJ_DIR$\..\Drivers\CMSIS\Device\ST\STM32F0xx\Include</state>
+                    <state>$PROJ_DIR$\..\Drivers\CMSIS\Device\ST\STM32F4xx\Include</state>
                 </option>
                 <option>
                     <name>CCStdIncCheck</name>
@@ -682,7 +682,7 @@
                 </option>
                 <option>
                     <name>OOCOutputFile</name>
-                    <state>bl_f030.bin</state>
+                    <state>bl_f411.bin</state>
                 </option>
                 <option>
                     <name>OOCCommandLineProducer</name>
@@ -784,7 +784,7 @@
                 </option>
                 <option>
                     <name>IlinkIcfFile</name>
-                    <state>$PROJ_DIR$\bl_f030.icf</state>
+                    <state>$PROJ_DIR$\bl_f411.icf</state>
                 </option>
                 <option>
                     <name>IlinkIcfFileSlave</name>
@@ -1017,7 +1017,7 @@
                 </option>
                 <option>
                     <name>IlinkTrustzoneImportLibraryOut</name>
-                    <state>bl_f030_import_lib.o</state>
+                    <state>bl_f411_import_lib.o</state>
                 </option>
                 <option>
                     <name>OILinkExtraOption</name>
@@ -1189,7 +1189,7 @@
                 </option>
                 <option>
                     <name>OGChipSelectEditMenu</name>
-                    <state>STM32F030F4	ST STM32F030F4</state>
+                    <state>STM32F411CE	ST STM32F411CE</state>
                 </option>
                 <option>
                     <name>GenLowLevelInterface</name>
@@ -1214,7 +1214,7 @@
                 <option>
                     <name>GBECoreSlave</name>
                     <version>35</version>
-                    <state>34</state>
+                    <state>40</state>
                 </option>
                 <option>
                     <name>OGUseCmsis</name>
@@ -1231,11 +1231,11 @@
                 <option>
                     <name>CoreVariant</name>
                     <version>35</version>
-                    <state>34</state>
+                    <state>40</state>
                 </option>
                 <option>
                     <name>GFPUDeviceSlave</name>
-                    <state>STM32F030F4	ST STM32F030F4</state>
+                    <state>STM32F411CE	ST STM32F411CE</state>
                 </option>
                 <option>
                     <name>FPU2</name>
@@ -1254,7 +1254,7 @@
                 <option>
                     <name>GFPUCoreSlave2</name>
                     <version>35</version>
-                    <state>34</state>
+                    <state>40</state>
                 </option>
                 <option>
                     <name>OGCMSISPackSelectDevice</name>
@@ -1329,7 +1329,7 @@
                 <option>
                     <name>OG_32_64DeviceCoreSlave</name>
                     <version>35</version>
-                    <state>34</state>
+                    <state>40</state>
                 </option>
                 <option>
                     <name>GOutputSo</name>
@@ -1351,7 +1351,7 @@
                 <option>
                     <name>CCDefines</name>
                     <state>NDEBUG</state>
-                    <state>STM32F030x6</state>
+                    <state>STM32F411xE</state>
                 </option>
                 <option>
                     <name>CCPreprocFile</name>
@@ -1472,7 +1472,7 @@
                 </option>
                 <option>
                     <name>CCIncludePath2</name>
-                    <state>$PROJ_DIR$\..\Drivers\CMSIS\Device\ST\STM32F0xx\Include</state>
+                    <state>$PROJ_DIR$\..\Drivers\CMSIS\Device\ST\STM32F4xx\Include</state>
                 </option>
                 <option>
                     <name>CCStdIncCheck</name>
@@ -1798,7 +1798,7 @@
                 </option>
                 <option>
                     <name>OOCOutputFile</name>
-                    <state>bl_f030.bin</state>
+                    <state>bl_f411.bin</state>
                 </option>
                 <option>
                     <name>OOCCommandLineProducer</name>
@@ -1900,7 +1900,7 @@
                 </option>
                 <option>
                     <name>IlinkIcfFile</name>
-                    <state>$PROJ_DIR$\bl_f030.icf</state>
+                    <state>$PROJ_DIR$\bl_f411.icf</state>
                 </option>
                 <option>
                     <name>IlinkIcfFileSlave</name>
@@ -2133,7 +2133,7 @@
                 </option>
                 <option>
                     <name>IlinkTrustzoneImportLibraryOut</name>
-                    <state>bl_f030_import_lib.o</state>
+                    <state>bl_f411_import_lib.o</state>
                 </option>
                 <option>
                     <name>OILinkExtraOption</name>

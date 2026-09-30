@@ -3,9 +3,12 @@
 Host application for flashing STM32 microcontrollers through a custom UART bootloader,
 combined with a firmware file viewer and converter.
 
-Windows, WPF, .NET 8. The matching bootloader firmware (see the [project README](../README.md)):
-[`../Firmware/bl_f030`](../Firmware/bl_f030) for STM32F030 and
-[`../Firmware/bl_f103`](../Firmware/bl_f103) for STM32F103C8 (Blue Pill). Both use the same protocol.
+Windows, WPF, .NET 8. The matching bootloader firmware (see the [project README](../README.md)),
+all with the same protocol:
+[`../Firmware/bl_f030`](../Firmware/bl_f030) for STM32F030,
+[`../Firmware/bl_f103`](../Firmware/bl_f103) for STM32F103C8 (Blue Pill),
+[`../Firmware/bl_f401`](../Firmware/bl_f401) and [`../Firmware/bl_f411`](../Firmware/bl_f411)
+for STM32F401 / STM32F411 (WeAct Black Pill).
 
 ## Features
 
@@ -38,14 +41,16 @@ dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile
 
 ## Quick start
 
-1. **Options...** - select the COM port, baud rate (115200) and application address (`0x08000800`).
+1. **Options...** - select the COM port, baud rate (115200) and application address
+   (`0x08000800` for STM32F030 / STM32F103, `0x08004000` for STM32F401 / STM32F411).
 2. **File -> Open...** - open a firmware file. The format is detected by extension, or by content if ambiguous.
 3. **Target -> Connect** - the host retries until cancelled. Reset the board: the bootloader waits
    3 seconds for the host after reset, then starts the application.
 4. **Target -> Program** - erase, write and reset in one operation.
 
 A raw `.bin` file has no address information and is assumed to start at the application address.
-HEX / S-record / TI-TXT images must be linked for the application address (`0x08000800` by default).
+HEX / S-record / TI-TXT images must be linked for the application address (`0x08000800` by default,
+`0x08004000` for the Black Pill bootloaders).
 
 ## Source layout
 
@@ -59,6 +64,7 @@ HEX / S-record / TI-TXT images must be linked for the application address (`0x08
 | `ProgressWindow.xaml(.cs)` | Programming progress with cancel |
 | `../Firmware/bl_f030/App/main.c` | Bootloader firmware for STM32F030 (register level, no HAL) |
 | `../Firmware/bl_f103/App/main.c` | Bootloader firmware for STM32F103C8 / Blue Pill (register level, no HAL) |
+| `../Firmware/bl_f401/App/main.c`, `../Firmware/bl_f411/App/main.c` | Bootloader firmware for STM32F401 / STM32F411 / Black Pill (same source) |
 
 Tunable `Bootloader` properties:
 
@@ -147,6 +153,11 @@ The application area size is `pages * page_size`. The reference firmware reports
 |---|---|---|---|
 | `bl_f030` (STM32F030F4) | 14 | 1024 | 16 KB device, 2 KB bootloader, 14 KB application |
 | `bl_f103` (STM32F103C8) | 62 | 1024 | 64 KB device, 2 KB bootloader, 62 KB application |
+| `bl_f401` (STM32F401CC) | 240 | 1024 | 256 KB device, 16 KB bootloader (sector 0), 240 KB application |
+| `bl_f401` / `bl_f411` (STM32F401CE, STM32F411CE) | 496 | 1024 | 512 KB device, 16 KB bootloader (sector 0), 496 KB application |
+
+On the STM32F401 / STM32F411 the flash is erased in sectors of 16 to 128 KB. There a "page" is
+only the write unit of `CMD_PROG`, and `CMD_ERASE` erases all sectors of the application area.
 
 ## Programming sequence
 
@@ -179,7 +190,7 @@ host                                    device
 Page rules:
 
 - `addr` is the **offset from the application start address**, not an absolute address.
-  The device writes at `APPLICATION_ADDRESS + addr` (`0x08000800 + addr`).
+  The device writes at `APPLICATION_ADDRESS + addr` (`0x08000800 + addr`; `0x08004000 + addr` on the STM32F401 / STM32F411).
 - `size` must be non-zero, not larger than `page_size`, and a multiple of 4; `addr` must be a
   multiple of 4; the page must fit into the application area. Otherwise the reply is `0x84`.
 - The last, partial page is padded with `0xFF` up to a multiple of 4 bytes.
@@ -273,22 +284,25 @@ uint32_t stm32_crc32(const void *buf, size_t len)
 - No interrupts are used: the main loop polls the USART IDLE flag and the SysTick `COUNTFLAG`.
   Only the first four vector table entries (initial SP, Reset, NMI, HardFault) are ever fetched,
   so `startup.c` uses a 4-entry vector table instead of the full one
-  (48 entries on the STM32F030, 59 on the STM32F103).
+  (48 entries on the STM32F030, 59 on the STM32F103, 101 / 102 on the STM32F401 / STM32F411).
 - Size with GCC `-Os -ffunction-sections -fdata-sections -Wl,--gc-sections` (vectors + code):
 
   | Firmware | Full vector table | 4-entry table |
   |---|---|---|
   | `bl_f030` (Cortex-M0) | 1076 bytes | 900 bytes |
   | `bl_f103` (Cortex-M3) | 1072 bytes | 852 bytes |
+  | `bl_f401` / `bl_f411` (Cortex-M4) | 1448 bytes | 1060 bytes |
 
-  With the short table the bootloader fits into one 1 KB page; the application area could then
+  With the short table the STM32F030 / STM32F103 bootloader fits into one 1 KB page; the application area could then
   start at `0x08000400` (`APPLICATION_ADDRESS`, `BLOCK_SIZE` + 1, application linker script and the
   HexLoad *App address* setting changed accordingly) - the protocol itself does not change.
 
 ## Application requirements
 
-Both bootloaders start the application at `0x08000800` with the core running from HSI 8 MHz and
-the peripherals used by the bootloader returned to their reset state.
+All bootloaders start the application with the core running from HSI (8 MHz on the STM32F0/F1,
+16 MHz on the STM32F4) and the peripherals used by the bootloader returned to their reset state.
+The application address is `0x08000800` on the STM32F030 / STM32F103 and `0x08004000` on the
+STM32F401 / STM32F411; set the HexLoad **App address** accordingly.
 
 STM32F030 (`bl_f030`):
 
@@ -304,6 +318,14 @@ STM32F103 (`bl_f103`):
   (`PRIMASK = 0`, as after reset). If the application's `SystemInit()` writes `VTOR` itself (older
   CMSIS / CubeF1 versions do it unconditionally), set `VECT_TAB_OFFSET` to `0x800`
   (in newer versions also define `USER_VECT_TAB_ADDRESS`).
+
+STM32F401 / STM32F411 (`bl_f401`, `bl_f411`):
+
+- Link the application for `0x08004000` (flash origin `0x08004000`, length 240 KB for the
+  STM32F401CC, 496 KB for the STM32F401CE / STM32F411CE).
+- As on the STM32F103, the bootloader sets `SCB->VTOR = 0x08004000` and starts the application with
+  interrupts enabled. If `SystemInit()` writes `VTOR`, set `VECT_TAB_OFFSET` to `0x4000`
+  (CubeF4: also define `USER_VECT_TAB_ADDRESS`).
 
 ---
 
