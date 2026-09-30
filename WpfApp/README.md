@@ -9,7 +9,8 @@ all with the same protocol:
 [`../Firmware/bl_f103`](../Firmware/bl_f103) for STM32F103C8 (Blue Pill),
 [`../Firmware/bl_f103vc`](../Firmware/bl_f103vc) for STM32F103VCT6 (HY-MiniSTM32V),
 [`../Firmware/bl_f401`](../Firmware/bl_f401) and [`../Firmware/bl_f411`](../Firmware/bl_f411)
-for STM32F401 / STM32F411 (WeAct Black Pill).
+for STM32F401 / STM32F411 (WeAct Black Pill),
+[`../Firmware/bl_at32f403a`](../Firmware/bl_at32f403a) for Artery AT32F403ACGU7 (WeAct BlackPill AT32F403A).
 
 ## Features
 
@@ -43,7 +44,7 @@ dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile
 ## Quick start
 
 1. **Options...** - select the COM port, baud rate (115200) and application address
-   (`0x08000800` for STM32F030 / STM32F103, `0x08004000` for STM32F401 / STM32F411).
+   (`0x08000800` for STM32F030 / STM32F103 / AT32F403A, `0x08004000` for STM32F401 / STM32F411).
 2. **File -> Open...** - open a firmware file. The format is detected by extension, or by content if ambiguous.
 3. **Target -> Connect** - the host retries until cancelled. Reset the board: the bootloader waits
    3 seconds for the host after reset, then starts the application.
@@ -67,6 +68,7 @@ HEX / S-record / TI-TXT images must be linked for the application address (`0x08
 | `../Firmware/bl_f103/App/main.c` | Bootloader firmware for STM32F103C8 / Blue Pill (register level, no HAL) |
 | `../Firmware/bl_f103vc/App/main.c` | Bootloader firmware for STM32F103VCT6 / HY-MiniSTM32V (register level, no HAL) |
 | `../Firmware/bl_f401/App/main.c`, `../Firmware/bl_f411/App/main.c` | Bootloader firmware for STM32F401 / STM32F411 / Black Pill (same source) |
+| `../Firmware/bl_at32f403a/App/main.c` | Bootloader firmware for Artery AT32F403ACGU7 / BlackPill AT32F403A (register level, no library code) |
 
 Tunable `Bootloader` properties:
 
@@ -158,9 +160,10 @@ The application area size is `pages * page_size`. The reference firmware reports
 | `bl_f103vc` (STM32F103VCT6) | 254 | 1024 | 256 KB device, 2 KB bootloader (one 2 KB flash page), 254 KB application |
 | `bl_f401` (STM32F401CC) | 240 | 1024 | 256 KB device, 16 KB bootloader (sector 0), 240 KB application |
 | `bl_f401` / `bl_f411` (STM32F401CE, STM32F411CE) | 496 | 1024 | 512 KB device, 16 KB bootloader (sector 0), 496 KB application |
+| `bl_at32f403a` (AT32F403ACGU7) | 1022 | 1024 | 1024 KB device, 2 KB bootloader (one 2 KB sector), 1022 KB application |
 
-On the STM32F103VC the flash is erased in 2 KB pages, on the STM32F401 / STM32F411 in sectors of
-16 to 128 KB. There a "page" is only the write unit of `CMD_PROG`, and `CMD_ERASE` erases all
+On the STM32F103VC the flash is erased in 2 KB pages, on the AT32F403A in 2 KB sectors, on the
+STM32F401 / STM32F411 in sectors of 16 to 128 KB. There a "page" is only the write unit of `CMD_PROG`, and `CMD_ERASE` erases all
 pages / sectors of the application area.
 
 ## Programming sequence
@@ -289,7 +292,7 @@ uint32_t stm32_crc32(const void *buf, size_t len)
   Only the first four vector table entries (initial SP, Reset, NMI, HardFault) are ever fetched,
   so `startup.c` uses a 4-entry vector table instead of the full one
   (48 entries on the STM32F030, 59 on the STM32F103C8, 76 on the STM32F103VC, 101 / 102 on the
-  STM32F401 / STM32F411).
+  STM32F401 / STM32F411, 97 on the AT32F403A).
 - Size with GCC `-Os -ffunction-sections -fdata-sections -Wl,--gc-sections` (vectors + code):
 
   | Firmware | Full vector table | 4-entry table |
@@ -298,6 +301,7 @@ uint32_t stm32_crc32(const void *buf, size_t len)
   | `bl_f103` (Cortex-M3) | 1072 bytes | 852 bytes |
   | `bl_f103vc` (Cortex-M3) | 1140 bytes | 852 bytes |
   | `bl_f401` / `bl_f411` (Cortex-M4) | 1448 bytes | 1060 bytes |
+  | `bl_at32f403a` (Cortex-M4) | 1332 bytes | 960 bytes |
 
   With the short table the STM32F030 / STM32F103C8 bootloader fits into one 1 KB page; the application area could then
   start at `0x08000400` (`APPLICATION_ADDRESS`, `BLOCK_SIZE` + 1, application linker script and the
@@ -305,10 +309,11 @@ uint32_t stm32_crc32(const void *buf, size_t len)
 
 ## Application requirements
 
-All bootloaders start the application with the core running from HSI (8 MHz on the STM32F0/F1,
-16 MHz on the STM32F4) and the peripherals used by the bootloader returned to their reset state.
-The application address is `0x08000800` on the STM32F030 / STM32F103 and `0x08004000` on the
-STM32F401 / STM32F411; set the HexLoad **App address** accordingly.
+All bootloaders start the application with the core running from the internal RC oscillator
+(HSI 8 MHz on the STM32F0/F1, HSI 16 MHz on the STM32F4, HICK 8 MHz on the AT32F403A) and the
+peripherals used by the bootloader returned to their reset state. The application address is
+`0x08000800` on the STM32F030 / STM32F103 / AT32F403A and `0x08004000` on the STM32F401 / STM32F411;
+set the HexLoad **App address** accordingly.
 
 STM32F030 (`bl_f030`):
 
@@ -333,6 +338,13 @@ STM32F401 / STM32F411 (`bl_f401`, `bl_f411`):
 - As on the STM32F103, the bootloader sets `SCB->VTOR = 0x08004000` and starts the application with
   interrupts enabled. If `SystemInit()` writes `VTOR`, set `VECT_TAB_OFFSET` to `0x4000`
   (CubeF4: also define `USER_VECT_TAB_ADDRESS`).
+
+AT32F403A (`bl_at32f403a`):
+
+- Link the application for `0x08000800` (flash origin `0x08000800`, length 1022 KB).
+- As on the STM32F103, the bootloader sets `SCB->VTOR = 0x08000800` and starts the application with
+  interrupts enabled. The Artery `SystemInit()` writes `VTOR` from `VECT_TAB_OFFSET`
+  (`system_at32f403a_407.c`); set it to `0x800`.
 
 ---
 

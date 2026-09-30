@@ -74,7 +74,7 @@
                 </option>
                 <option>
                     <name>OGChipSelectEditMenu</name>
-                    <state>STM32F401CC	ST STM32F401CC</state>
+                    <state>AT32F403ACGU7_v2	ArteryTek -AT32F403ACGU7</state>
                 </option>
                 <option>
                     <name>GenLowLevelInterface</name>
@@ -120,7 +120,7 @@
                 </option>
                 <option>
                     <name>GFPUDeviceSlave</name>
-                    <state>STM32F401CC	ST STM32F401CC</state>
+                    <state>AT32F403ACGU7_v2	ArteryTek -AT32F403ACGU7</state>
                 </option>
                 <option>
                     <name>FPU2</name>
@@ -235,7 +235,7 @@
                 </option>
                 <option>
                     <name>CCDefines</name>
-                    <state>STM32F401xC</state>
+                    <state>AT32F403ACGU7</state>
                 </option>
                 <option>
                     <name>CCPreprocFile</name>
@@ -356,7 +356,9 @@
                 </option>
                 <option>
                     <name>CCIncludePath2</name>
-                    <state>$PROJ_DIR$\..\Drivers\CMSIS\Device\ST\STM32F4xx\Include</state>
+                    <state>$PROJ_DIR$\..\App</state>
+                    <state>$PROJ_DIR$\..\Drivers\CMSIS\Device\ArteryTek\AT32F403A_407\Include</state>
+                    <state>$PROJ_DIR$\..\Drivers\AT32F403A_407_Driver\inc</state>
                 </option>
                 <option>
                     <name>CCStdIncCheck</name>
@@ -682,7 +684,7 @@
                 </option>
                 <option>
                     <name>OOCOutputFile</name>
-                    <state>bl_f401.bin</state>
+                    <state>bl_at32f403a.bin</state>
                 </option>
                 <option>
                     <name>OOCCommandLineProducer</name>
@@ -784,7 +786,7 @@
                 </option>
                 <option>
                     <name>IlinkIcfFile</name>
-                    <state>$PROJ_DIR$\bl_f401.icf</state>
+                    <state>$PROJ_DIR$\bl_at32f403a.icf</state>
                 </option>
                 <option>
                     <name>IlinkIcfFileSlave</name>
@@ -1017,7 +1019,7 @@
                 </option>
                 <option>
                     <name>IlinkTrustzoneImportLibraryOut</name>
-                    <state>bl_f401_import_lib.o</state>
+                    <state>bl_at32f403a_import_lib.o</state>
                 </option>
                 <option>
                     <name>OILinkExtraOption</name>
@@ -1189,7 +1191,7 @@
                 </option>
                 <option>
                     <name>OGChipSelectEditMenu</name>
-                    <state>STM32F401CC	ST STM32F401CC</state>
+                    <state>AT32F403ACGU7_v2	ArteryTek -AT32F403ACGU7</state>
                 </option>
                 <option>
                     <name>GenLowLevelInterface</name>
@@ -1235,7 +1237,7 @@
                 </option>
                 <option>
                     <name>GFPUDeviceSlave</name>
-                    <state>STM32F401CC	ST STM32F401CC</state>
+                    <state>AT32F403ACGU7_v2	ArteryTek -AT32F403ACGU7</state>
                 </option>
                 <option>
                     <name>FPU2</name>
@@ -1351,7 +1353,7 @@
                 <option>
                     <name>CCDefines</name>
                     <state>NDEBUG</state>
-                    <state>STM32F401xC</state>
+                    <state>AT32F403ACGU7</state>
                 </option>
                 <option>
                     <name>CCPreprocFile</name>
@@ -1472,7 +1474,9 @@
                 </option>
                 <option>
                     <name>CCIncludePath2</name>
-                    <state>$PROJ_DIR$\..\Drivers\CMSIS\Device\ST\STM32F4xx\Include</state>
+                    <state>$PROJ_DIR$\..\App</state>
+                    <state>$PROJ_DIR$\..\Drivers\CMSIS\Device\ArteryTek\AT32F403A_407\Include</state>
+                    <state>$PROJ_DIR$\..\Drivers\AT32F403A_407_Driver\inc</state>
                 </option>
                 <option>
                     <name>CCStdIncCheck</name>
@@ -1798,7 +1802,7 @@
                 </option>
                 <option>
                     <name>OOCOutputFile</name>
-                    <state>bl_f401.bin</state>
+                    <state>bl_at32f403a.bin</state>
                 </option>
                 <option>
                     <name>OOCCommandLineProducer</name>
@@ -1900,7 +1904,7 @@
                 </option>
                 <option>
                     <name>IlinkIcfFile</name>
-                    <state>$PROJ_DIR$\bl_f401.icf</state>
+                    <state>$PROJ_DIR$\bl_at32f403a.icf</state>
                 </option>
                 <option>
                     <name>IlinkIcfFileSlave</name>
@@ -2133,7 +2137,7 @@
                 </option>
                 <option>
                     <name>IlinkTrustzoneImportLibraryOut</name>
-                    <state>bl_f401_import_lib.o</state>
+                    <state>bl_at32f403a_import_lib.o</state>
                 </option>
                 <option>
                     <name>OILinkExtraOption</name>
