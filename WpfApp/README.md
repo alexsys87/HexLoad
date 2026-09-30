@@ -3,7 +3,8 @@
 Host application for flashing STM32 microcontrollers through a custom UART bootloader,
 combined with a firmware file viewer and converter.
 
-Windows, WPF, .NET 8. The matching bootloader firmware for STM32F030 is in `firmware/main.c`.
+Windows, WPF, .NET 8. The matching bootloader firmware for STM32F030 is in
+[`../Firmware/bl_f030`](../Firmware/bl_f030) (see the [project README](../README.md)).
 
 ## Features
 
@@ -55,7 +56,7 @@ HEX / S-record / TI-TXT images must be linked for the application address (`0x08
 | `MainWindow.xaml(.cs)` | Main window: menu, hex view, log, programming |
 | `SettingsWindow.xaml(.cs)` | COM port, baud rate and application address |
 | `ProgressWindow.xaml(.cs)` | Programming progress with cancel |
-| `firmware/main.c` | Bootloader firmware for STM32F030 (register level, no HAL) |
+| `../Firmware/bl_f030/App/main.c` | Bootloader firmware for STM32F030 (register level, no HAL) |
 
 Tunable `Bootloader` properties:
 
@@ -81,6 +82,7 @@ interrupt** as the end-of-packet marker. Consequences for the host:
   character time (about 87 us at 115200) splits it into two packets. HexLoad always sends a whole
   packet with a single `Write()` call.
 - Packets longer than 1040 bytes are truncated.
+- An IDLE event with no bytes received is ignored.
 - The host must wait for the reply before sending the next packet.
 
 ## Packet
@@ -264,9 +266,9 @@ uint32_t stm32_crc32(const void *buf, size_t len)
 
 - No interrupts are used: the main loop polls the USART IDLE flag and the SysTick `COUNTFLAG`.
   Only the first four vector table entries (initial SP, Reset, NMI, HardFault) are ever fetched,
-  so the startup file may use a 4-entry vector table instead of the full 48-entry CMSIS one.
+  so `startup.c` uses a 4-entry vector table instead of the full 48-entry one.
 - Size with GCC `-Os -ffunction-sections -fdata-sections -Wl,--gc-sections` (vectors + code):
-  1068 bytes with the full vector table, 892 bytes with a 4-entry table.
+  1076 bytes with the full vector table, 900 bytes with the 4-entry table.
   With the short table the bootloader fits into one 1 KB page; the application area could then
   start at `0x08000400` (`APPLICATION_ADDRESS`, `BLOCK_SIZE = 15`, application linker script and the
   HexLoad *App address* setting changed accordingly) - the protocol itself does not change.
