@@ -19,6 +19,9 @@ for STM32F401 / STM32F411 (WeAct Black Pill),
 - Separate Erase and Reset commands.
 - Opens **BIN**, **Intel HEX**, **Motorola S-record** and **TI-TXT** files with full extended
   addressing support (record types 02/04, S1/S2/S3) and checksum validation.
+- Drag and drop: drop a firmware file on the window to open it (one file at a time; not while
+  a target operation is running). Windows does not deliver drops from Explorer to a program
+  started as administrator.
 - Saves **BIN**, **Intel HEX**, **Motorola S-record**, **TI-TXT** and **C array**, preserving the image base address.
 - Load address check: warns if a HEX/S-record image is not linked for the application address,
   and can strip the bootloader area from a combined bootloader + application image.
@@ -45,7 +48,8 @@ dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile
 
 1. **Options...** - select the COM port, baud rate (115200) and application address
    (`0x08000800` for STM32F030 / STM32F103 / AT32F403A, `0x08004000` for STM32F401 / STM32F411).
-2. **File -> Open...** - open a firmware file. The format is detected by extension, or by content if ambiguous.
+2. **File -> Open...** - open a firmware file, or drag the file from Explorer and drop it anywhere on the
+   window. The format is detected by extension, or by content if ambiguous.
 3. **Target -> Connect** - the host retries until cancelled. Reset the board: the bootloader waits
    3 seconds for the host after reset, then starts the application.
 4. **Target -> Program** - erase, write and reset in one operation.

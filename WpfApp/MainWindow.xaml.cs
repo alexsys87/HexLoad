@@ -241,10 +241,14 @@ namespace HexLoad
 
             if (dialog.ShowDialog() != true) return;
 
+            OpenFirmwareFile(dialog.FileName);
+        }
+
+        /// <summary>Loads a firmware file (menu File -> Open... or drag and drop).</summary>
+        private void OpenFirmwareFile(string path)
+        {
             try
             {
-                string path = dialog.FileName;
-
                 // Detect the format by extension, or by the file head if ambiguous.
                 // Text formats are read line by line, binary directly as bytes (no double read).
                 byte[] head = ReadHead(path, 512);
@@ -292,6 +296,46 @@ namespace HexLoad
                 Log($"Failed to open file: {ex.Message}");
                 MessageBox.Show(ex.Message, "Open file", MessageBoxButton.OK, MessageBoxImage.Error);
             }
+        }
+
+        // ==================== Drag and drop ====================
+
+        /// <summary>
+        /// Returns the dropped file if the drag data holds exactly one existing file, else null.
+        /// Folders and several files at once are not accepted.
+        /// </summary>
+        private static string? GetDroppedFile(IDataObject data)
+        {
+            if (!data.GetDataPresent(DataFormats.FileDrop)) return null;
+            if (data.GetData(DataFormats.FileDrop) is not string[] files || files.Length != 1) return null;
+            return File.Exists(files[0]) ? files[0] : null;
+        }
+
+        // Preview (tunneling) events: the text boxes of the window handle drag and drop themselves
+        // and would otherwise reject the file over the address field or the log.
+        private void Window_PreviewDragOver(object sender, DragEventArgs e)
+        {
+            // While the port is busy the file cannot be replaced (same rule as the Open... menu item)
+            e.Effects = !_busy && GetDroppedFile(e.Data) != null ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        private void Window_PreviewDrop(object sender, DragEventArgs e)
+        {
+            e.Handled = true;
+            if (_busy) return;
+
+            string? path = GetDroppedFile(e.Data);
+            if (path == null) return;
+
+            // Open after the drop has completed: the source application (Explorer) waits until
+            // this handler returns, and an error message box would block it.
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_busy) return;
+                Activate();
+                OpenFirmwareFile(path);
+            }));
         }
 
         private static byte[] ReadHead(string path, int count)
