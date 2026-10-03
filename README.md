@@ -215,6 +215,6 @@ Typical flashing session:
 2. In HexLoad open **Options...**, select the COM port and check the **App address**
    (`0x08000800` for STM32F030, Blue Pill, HY-MiniSTM32V and BlackPill AT32F403A,
    `0x08004000` for the STM32F4 Black Pill).
-3. Open the firmware file, then choose **Target -> Connect**.
+3. Open the firmware file (**File -> Open...** or drag and drop it on the window), then choose **Target -> Connect**.
 4. Reset the board: the bootloader answers within its 3 s window.
 5. Choose **Target -> Program**. HexLoad erases, writes, verifies and resets the device, which then starts the new application.
