@@ -1,0 +1,43 @@
+name: WPF build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'WpfApp/**'
+      - '.github/workflows/wpf-build.yml'
+  pull_request:
+    paths:
+      - 'WpfApp/**'
+      - '.github/workflows/wpf-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: WpfApp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore HexLoad.sln
+
+      - name: Build
+        run: dotnet build HexLoad.sln -c Release --no-restore
+
+      - name: Publish
+        run: dotnet publish HexLoad.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HexLoad-win-x64
+          path: WpfApp/publish/
+          if-no-files-found: error
