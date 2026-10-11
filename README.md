@@ -13,7 +13,7 @@ through them. All bootloaders use the same protocol:
 | Bootloader AT32F403A | [`Firmware/bl_at32f403a`](Firmware/bl_at32f403a) | Artery AT32F403ACGU7, WeAct Studio "BlackPill" AT32F403A core board |
 | Host application | [`WpfApp`](WpfApp) | Windows WPF (.NET 8) programmer plus firmware file viewer and converter |
 
-Every bootloader is register-level C code (no HAL) with an IAR EWARM project.
+Every bootloader is register-level C code (no HAL) with an IAR EWARM project and a GCC Makefile.
 
 **[WpfApp/README.md](WpfApp/README.md)** is the main reference. This file does not repeat it. It covers:
 
@@ -35,10 +35,13 @@ HexLoad/
 │   │   ├── App/main.c          UART + DMA reception, flash erase/program/verify, CRC
 │   │   ├── Drivers/CMSIS/Device/ST/STM32F0xx/
 │   │   │                       STM32F0 device headers (STMicroelectronics, Apache-2.0)
-│   │   └── EWARM/
-│   │       ├── bl_f030.eww/.ewp/.ewd  IAR EWARM workspace, project, debugger settings
-│   │       ├── bl_f030.icf            linker configuration
-│   │       └── startup.c              4-entry vector table and reset handler
+│   │   ├── EWARM/
+│   │   │   ├── bl_f030.eww/.ewp/.ewd  IAR EWARM workspace, project, debugger settings
+│   │   │   ├── bl_f030.icf            linker configuration
+│   │   │   └── startup.c              4-entry vector table and reset handler
+│   │   └── GCC/
+│   │       ├── Makefile               arm-none-eabi-gcc build (device, core, include paths)
+│   │       └── bl_f030.ld             GNU ld memory regions
 │   ├── bl_f103/                STM32F103C8 (Blue Pill) bootloader, same structure (STM32F1xx headers)
 │   ├── bl_f103vc/              STM32F103VCT6 (HY-MiniSTM32V) bootloader, same structure (STM32F1xx headers)
 │   ├── bl_f401/                STM32F401 (Black Pill) bootloader, same structure (STM32F4xx headers)
@@ -47,6 +50,9 @@ HexLoad/
 │       ├── App/                main.c + at32f403a_407_conf.h (Artery library configuration)
 │       └── Drivers/            Artery device headers and the register definitions of the
 │                               used peripherals (AT32F403A_407 library v2.2.2, BSD-3-Clause)
+│   ├── CMSIS/Core/Include/     Cortex-M core headers for the GCC build (Arm CMSIS 5.9.0, Apache-2.0)
+│   ├── gcc/                    shared GCC files: rules.mk, startup.c (4-entry vector table), sections.ld
+│   └── Makefile                builds all bootloaders with GCC
 └── WpfApp/                     host application (HexLoad.sln), see WpfApp/README.md
 ```
 
@@ -55,7 +61,8 @@ selected device, the CMSIS device define and the RAM size in the linker configur
 
 CMSIS device headers: `cmsis_device_f0` v2.3.7, `cmsis_device_f1` v4.3.5, `cmsis_device_f4`
 v2.6.11 from [STMicroelectronics](https://github.com/STMicroelectronics). The Cortex-M core
-headers (`core_cm0.h`, `core_cm3.h`, `core_cm4.h`) come from the IAR toolkit.
+headers (`core_cm0.h`, `core_cm3.h`, `core_cm4.h`) come from the IAR toolkit for the EWARM projects
+and from [Arm CMSIS 5.9.0](https://github.com/ARM-software/CMSIS_5) (`Firmware/CMSIS`) for the GCC build.
 Artery headers: `AT32F403A_407_Firmware_Library` v2.2.2 from [ArteryTek](https://github.com/ArteryTek).
 
 ## Bootloaders
@@ -123,7 +130,7 @@ STM32F401/F411 and AT32F403A the bootloader sets `VTOR` itself. See [application
 ### Vector table and size
 
 The bootloader never enables an interrupt, so the core fetches only the first four vector table
-words: initial SP, Reset, NMI and HardFault. `EWARM/startup.c` therefore has a 4-entry table
+words: initial SP, Reset, NMI and HardFault. `EWARM/startup.c` and `gcc/startup.c` therefore have a 4-entry table
 instead of the full one (STM32F030: 48 entries, STM32F103xB: 59, STM32F103xE: 76, STM32F401: 101,
 STM32F411: 102, AT32F403A: 97):
 
@@ -147,6 +154,22 @@ saved page for the application, change `APPLICATION_ADDRESS` to `0x08000400` and
 linker script and the *App address* setting of HexLoad. The protocol does not change.
 
 ### Building
+
+#### GCC (Ubuntu Linux / WSL)
+
+```
+sudo apt install gcc-arm-none-eabi libnewlib-arm-none-eabi make
+make -C Firmware            # all bootloaders
+make -C Firmware bl_f103    # one bootloader
+make -C Firmware clean
+```
+
+The images are written to `Firmware/<bl_xxx>/GCC/build/<bl_xxx>.elf`, `.hex` and `.bin`. Another
+toolchain can be selected with `PREFIX`, e.g. `make -C Firmware PREFIX=/opt/arm/bin/arm-none-eabi-`.
+The GitHub Actions workflow `.github/workflows/firmware-build.yml` runs the same build and publishes
+the images as the `bootloaders` artifact.
+
+#### IAR EWARM
 
 Open `Firmware/<bl_xxx>/EWARM/<bl_xxx>.eww` in IAR Embedded Workbench for ARM (the projects were
 last saved with 9.70) and build. Flash the resulting image at `0x08000000` with any SWD programmer

@@ -1,0 +1,40 @@
+name: Firmware build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Firmware/**'
+      - '.github/workflows/firmware-build.yml'
+  pull_request:
+    paths:
+      - 'Firmware/**'
+      - '.github/workflows/firmware-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi make
+          arm-none-eabi-gcc --version
+
+      - name: Build
+        run: make -C Firmware -j"$(nproc)"
+
+      - name: Collect images
+        run: |
+          mkdir -p artifacts
+          cp Firmware/bl_*/GCC/build/*.elf Firmware/bl_*/GCC/build/*.hex Firmware/bl_*/GCC/build/*.bin artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootloaders
+          path: artifacts/
+          if-no-files-found: error
