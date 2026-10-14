@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -33,7 +33,7 @@ jobs:
           mkdir -p artifacts
           cp Firmware/bl_*/GCC/build/*.elf Firmware/bl_*/GCC/build/*.hex Firmware/bl_*/GCC/build/*.bin artifacts/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: bootloaders
           path: artifacts/
